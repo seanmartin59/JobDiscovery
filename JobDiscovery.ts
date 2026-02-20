@@ -607,8 +607,8 @@ function gate0_writeTestRows() {
         failed += 1;
       }
   
-      // Safety cap for now
-      if ((enriched + failed) >= 25) break;
+      // Safety cap: stay under Apps Script 6-min limit (~2s per fetch → ~50 is safe)
+      if ((enriched + failed) >= 50) break;
     }
   
     logs.appendRow([new Date(),"Gate 3B",`Scanned=${scanned}, enriched=${enriched}, failed=${failed}.`]);
