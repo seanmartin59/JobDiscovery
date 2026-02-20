@@ -1,0 +1,12 @@
+# Secrets / env (if you add them later)
+.env
+.env.local
+*.pem
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Node / deps (if you add a Node project later)
+node_modules/
