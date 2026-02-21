@@ -330,6 +330,75 @@ function gate0_writeTestRows() {
     Logger.log("Contains 'Apply'? " + /apply/i.test(text));
   }
   
+  /**
+   * Ashby job pages are JS-rendered; UrlFetchApp gets almost no content. Use their public API instead.
+   * GET https://api.ashbyhq.com/posting-api/job-board/{JOB_BOARD_NAME} returns JSON with jobs[].descriptionPlain, jobUrl, location, workplaceType.
+   */
+  function fetchAshbyJobDescription_(url) {
+    if (!url || !String(url).includes("jobs.ashbyhq.com")) return null;
+    try {
+      const pathMatch = url.match(/https:\/\/jobs\.ashbyhq\.com\/([^\/]+)/i);
+      const boardName = pathMatch && pathMatch[1] ? pathMatch[1] : null;
+      if (!boardName) return null;
+      const apiUrl = "https://api.ashbyhq.com/posting-api/job-board/" + encodeURIComponent(boardName);
+      const resp = UrlFetchApp.fetch(apiUrl, {
+        muteHttpExceptions: true,
+        headers: { "Accept": "application/json" }
+      });
+      if (resp.getResponseCode() !== 200) return null;
+      const data = JSON.parse(resp.getContentText());
+      const jobs = (data && data.jobs) ? data.jobs : [];
+      const canon = (String(url).split("#")[0] || "").replace(/\/$/, "").toLowerCase();
+      const canonPath = canon.replace(/^https?:\/\/[^\/]+/i, "") || "/";
+      const canonSegs = canonPath.split("/").filter(Boolean);
+      for (let i = 0; i < jobs.length; i++) {
+        const job = jobs[i];
+        const jobUrl = (job.jobUrl || "").replace(/\/$/, "").toLowerCase();
+        const jobPath = jobUrl.replace(/^https?:\/\/[^\/]+/i, "") || "/";
+        const jobSegs = jobPath.split("/").filter(Boolean);
+        const exactPath = canonPath === jobPath || canon === jobUrl || canonPath.endsWith(jobPath) || jobPath.endsWith(canonPath) || canon.indexOf(jobUrl) !== -1 || jobUrl.indexOf(canon) !== -1;
+        const boardAndSlugMatch = canonSegs.length >= 2 && jobSegs.length >= 1 && canonSegs[0] === jobSegs[0] && canonSegs[canonSegs.length - 1] === jobSegs[jobSegs.length - 1];
+        if (exactPath || boardAndSlugMatch) {
+          const text = (job.descriptionPlain || job.descriptionHtml || "").trim();
+          if (job.descriptionHtml && !text) return { text: htmlToText_(job.descriptionHtml), locationRaw: job.location || "", workMode: job.workplaceType || "" };
+          const locationRaw = (job.location || "").trim();
+          let workMode = (job.workplaceType || "").trim();
+          if (job.isRemote && workMode !== "Remote") workMode = workMode ? workMode + ", remote" : "remote";
+          return { text: text || "", locationRaw, workMode };
+        }
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Run from Apps Script: paste one failing Ashby URL inside the quotes below, then run this function (Run > runDebugAshby), then View > Executions or View > Logs. */
+  function runDebugAshby() {
+    debugAshbyMatch("https://jobs.ashbyhq.com/PASTE_ONE_FAILING_URL_HERE");
+  }
+
+  /** Run once in Apps Script: paste one Ashby FetchError URL as the argument, then check Logs. Shows API jobUrl values so we can see why matching might fail. */
+  function debugAshbyMatch(sheetUrl) {
+    if (!sheetUrl || !String(sheetUrl).includes("jobs.ashbyhq.com")) { Logger.log("Not an Ashby URL"); return; }
+    const pathMatch = sheetUrl.match(/https:\/\/jobs\.ashbyhq\.com\/([^\/]+)/i);
+    const boardName = pathMatch && pathMatch[1] ? pathMatch[1] : null;
+    if (!boardName) { Logger.log("No board name"); return; }
+    const apiUrl = "https://api.ashbyhq.com/posting-api/job-board/" + encodeURIComponent(boardName);
+    const resp = UrlFetchApp.fetch(apiUrl, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+    Logger.log("API status: " + resp.getResponseCode());
+    if (resp.getResponseCode() !== 200) { Logger.log(resp.getContentText().slice(0, 500)); return; }
+    const data = JSON.parse(resp.getContentText());
+    const jobs = (data && data.jobs) ? data.jobs : [];
+    Logger.log("Board: " + boardName + ", jobs count: " + jobs.length);
+    Logger.log("Sheet URL (norm): " + (String(sheetUrl).split("#")[0] || "").replace(/\/$/, "").toLowerCase());
+    for (let i = 0; i < Math.min(jobs.length, 15); i++) {
+      const j = jobs[i];
+      const u = (j.jobUrl || "").replace(/\/$/, "").toLowerCase();
+      Logger.log("  jobUrl[" + i + "]: " + u + " | descriptionPlain length: " + (j.descriptionPlain || "").length);
+    }
+  }
+
   /** very lightweight html -> text */
   function htmlToText_(html) {
     if (!html) return "";
@@ -490,8 +559,8 @@ function gate0_writeTestRows() {
     const headerMap = {};
     headers.forEach((h,i)=>{ if(h) headerMap[h]=i+1; });
   
-    // Ensure columns exist (append missing to the right)
-    const needed = ["jd_text","location_raw","work_mode_hint","fetched_at","http_status","failure_reason"];
+    // Ensure columns exist (append missing to the right). fetched_at = last attempt (any outcome); enriched_at = when we successfully enriched.
+    const needed = ["jd_text","location_raw","work_mode_hint","fetched_at","enriched_at","http_status","failure_reason"];
     let col = roles.getLastColumn();
     needed.forEach(h=>{
       if(!headerMap[h]) {
@@ -527,9 +596,13 @@ function gate0_writeTestRows() {
       const source = row[baseCols.source-1];
       const jdTextExisting = row[headerMap["jd_text"]-1];
   
-      // Only enrich new Brave rows, and only if jd_text not already set
-      if (!url || status !== "New" || source !== "brave_search") continue;
-      if (jdTextExisting && jdTextExisting.toString().trim().length > 0) continue;
+      // Enrich any New row (include brave_search + blank source for legacy/misaligned rows)
+      if (!url || status !== "New") continue;
+      const src = (source != null && source !== "") ? String(source).trim() : "";
+      if (src && src !== "brave_search") continue; // skip known non-discovery sources (e.g. google_alert, test_email)
+      // Only skip if we already have a real JD (length > 500). Short junk (e.g. "lever", "ashby", "greenhouse") stays eligible.
+      const jdLen = (jdTextExisting != null && jdTextExisting !== "") ? String(jdTextExisting).trim().length : 0;
+      if (jdLen > 500) continue;
   
       scanned += 1;
   
@@ -538,49 +611,63 @@ function gate0_writeTestRows() {
       let locationRaw = "";
       let workMode = "";
       let failureReason = "";
-  
+      const isAshby = String(url).indexOf("jobs.ashbyhq.com") !== -1;
+
       try {
-        const resp = UrlFetchApp.fetch(url, {
-          muteHttpExceptions: true,
-          followRedirects: true,
-          headers: { "User-Agent": "Mozilla/5.0" }
-        });
-        httpStatus = resp.getResponseCode();
-        const html = resp.getContentText();
-        text = htmlToText_(html);
-  
-        // Detect common failure pages
-        const lower = (text || "").toLowerCase();
-        const looks404 =
+        if (isAshby) {
+          const ashby = fetchAshbyJobDescription_(url);
+          if (ashby && (ashby.text || "").length >= 100) {
+            text = ashby.text;
+            locationRaw = ashby.locationRaw || extractLocationHint_(text.slice(0, 600));
+            workMode = ashby.workMode || extractWorkModeHint_(text);
+            httpStatus = 200;
+          } else {
+            failureReason = "TEXT_TOO_SHORT";
+            httpStatus = 200;
+          }
+        }
+        if (!text && !failureReason) {
+          const resp = UrlFetchApp.fetch(url, {
+            muteHttpExceptions: true,
+            followRedirects: true,
+            headers: { "User-Agent": "Mozilla/5.0" }
+          });
+          httpStatus = resp.getResponseCode();
+          const html = resp.getContentText();
+          text = htmlToText_(html);
+
+          // Detect common failure pages
+          const lower = (text || "").toLowerCase();
+          const looks404 =
           lower.includes("404 error") ||
           lower.includes("not found") ||
           lower.includes("couldn't find anything here") ||
           lower.includes("the job posting you're looking for might have closed");
-  
-        // Minimum “real JD” threshold (tune later)
-        const tooShort = (text || "").length < 800;
-  
-        if (httpStatus !== 200) {
-          failureReason = `HTTP_${httpStatus}`;
-        } else if (looks404) {
-          failureReason = "LEVER_404_PAGE";
-        } else if (tooShort) {
-          failureReason = "TEXT_TOO_SHORT";
-        } else if (lower.includes("democorp") || lower.includes("jobs at democorp")) {
-          failureReason = "DEMO_BOARD";
+
+          const tooShort = (text || "").length < 800;
+
+          if (httpStatus !== 200) {
+            failureReason = `HTTP_${httpStatus}`;
+          } else if (looks404) {
+            failureReason = "LEVER_404_PAGE";
+          } else if (tooShort) {
+            failureReason = "TEXT_TOO_SHORT";
+          } else if (lower.includes("democorp") || lower.includes("jobs at democorp")) {
+            failureReason = "DEMO_BOARD";
+          }
+
+          if (!failureReason) {
+            const top = text.slice(0, 600);
+            locationRaw = extractLocationHint_(top);
+            workMode = extractWorkModeHint_(text);
+          }
         }
-  
-        if (!failureReason) {
-          const top = text.slice(0, 600);
-          locationRaw = extractLocationHint_(top);
-          workMode = extractWorkModeHint_(text);
-        }
-  
+
       } catch (e) {
         httpStatus = "ERR";
         failureReason = "EXCEPTION";
       }
-  
+
       const sheetRow = r + 2;
       roles.getRange(sheetRow, headerMap["http_status"]).setValue(httpStatus);
       roles.getRange(sheetRow, headerMap["fetched_at"]).setValue(new Date());
@@ -591,6 +678,7 @@ function gate0_writeTestRows() {
         roles.getRange(sheetRow, headerMap["work_mode_hint"]).setValue(workMode);
         roles.getRange(sheetRow, baseCols.status).setValue("Enriched");
         roles.getRange(sheetRow, headerMap["failure_reason"]).setValue("");
+        if (headerMap["enriched_at"]) roles.getRange(sheetRow, headerMap["enriched_at"]).setValue(new Date());
         enriched += 1;
       } else {
         // Don’t write junk JD text; mark failure so we can retry / ignore
@@ -691,7 +779,64 @@ function gate0_writeTestRows() {
   
     logs.appendRow([new Date(), "Gate 3B Reset", `Reset ${reset} rows from Enriched->New due to bad content.`]);
   }
-  
+
+  /** Reset FetchError TEXT_TOO_SHORT rows to New so Gate 3B will retry them (e.g. after Ashby URL matching or other fixes). */
+  function gate3B_resetTextTooShortToNew() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const roles = ss.getSheetByName("Roles");
+    const logs = ensureSheet_(ss, "Logs");
+    if (!roles) throw new Error("Roles sheet not found.");
+    const headers = roles.getRange(1, 1, 1, roles.getLastColumn()).getValues()[0].map(h => (h || "").toString().trim());
+    const col = {};
+    headers.forEach((h, i) => { if (h) col[h] = i + 1; });
+    ["canonical_url", "status", "failure_reason", "jd_text", "location_raw", "work_mode_hint", "http_status", "fetched_at"].forEach(h => { if (!col[h]) throw new Error("Missing column: " + h); });
+    const lastRow = roles.getLastRow();
+    if (lastRow < 2) return;
+    const data = roles.getRange(2, 1, lastRow, roles.getLastColumn()).getValues();
+    let reset = 0;
+    for (let r = 0; r < data.length; r++) {
+      const status = (data[r][col["status"] - 1] || "").toString().trim();
+      const failureReason = (data[r][col["failure_reason"] - 1] || "").toString().trim();
+      if (status !== "FetchError" || failureReason !== "TEXT_TOO_SHORT") continue;
+      const sheetRow = r + 2;
+      roles.getRange(sheetRow, col["jd_text"]).setValue("");
+      roles.getRange(sheetRow, col["location_raw"]).setValue("");
+      roles.getRange(sheetRow, col["work_mode_hint"]).setValue("");
+      roles.getRange(sheetRow, col["http_status"]).setValue("");
+      roles.getRange(sheetRow, col["failure_reason"]).setValue("");
+      roles.getRange(sheetRow, col["fetched_at"]).setValue("");
+      roles.getRange(sheetRow, col["status"]).setValue("New");
+      reset += 1;
+    }
+    logs.appendRow([new Date(), "Gate 3B Reset TEXT_TOO_SHORT", `Reset ${reset} rows (FetchError TEXT_TOO_SHORT -> New) for retry.`]);
+  }
+
+  /** Normalize legacy rows: set status to Dead where failure_reason is HTTP_404 or LEVER_404_PAGE (so we don't retry dead links). */
+  function gate3B_normalize404ToDead() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const roles = ss.getSheetByName("Roles");
+    const logs = ensureSheet_(ss, "Logs");
+    if (!roles) throw new Error("Roles sheet not found.");
+    const headers = roles.getRange(1, 1, 1, roles.getLastColumn()).getValues()[0].map(h => (h || "").toString().trim());
+    const col = {};
+    headers.forEach((h, i) => { if (h) col[h] = i + 1; });
+    if (!col["status"] || !col["failure_reason"]) throw new Error("Missing status or failure_reason column.");
+    const lastRow = roles.getLastRow();
+    if (lastRow < 2) return;
+    const data = roles.getRange(2, 1, lastRow, roles.getLastColumn()).getValues();
+    let updated = 0;
+    for (let r = 0; r < data.length; r++) {
+      const status = (data[r][col["status"] - 1] || "").toString().trim();
+      const failureReason = (data[r][col["failure_reason"] - 1] || "").toString().trim();
+      if (status === "Dead") continue;
+      if (failureReason !== "HTTP_404" && failureReason !== "LEVER_404_PAGE") continue;
+      const sheetRow = r + 2;
+      roles.getRange(sheetRow, col["status"]).setValue("Dead");
+      updated += 1;
+    }
+    logs.appendRow([new Date(), "Gate 3B Normalize 404", `Set status=Dead for ${updated} rows with failure_reason HTTP_404/LEVER_404_PAGE.`]);
+  }
+
   function gate4_score_enriched_roles_v0() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const roles = ss.getSheetByName("Roles");
@@ -946,12 +1091,13 @@ function gate0_writeTestRows() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const logs = ensureSheet_(ss, "Logs");
 
-    const { sheet: roles } = ensureRolesSchema_();
+    const { sheet: roles, headerMap } = ensureRolesSchema_();
 
     const token = PropertiesService.getScriptProperties().getProperty("BRAVE_SUBSCRIPTION_TOKEN");
     if (!token) throw new Error("Missing BRAVE_SUBSCRIPTION_TOKEN in Script Properties.");
 
     const existing = new Set(getColumnValues_(roles, 1)); // canonical_url
+    const numCols = roles.getLastColumn();
 
     let totalResults = 0;
     let candidates = 0;
@@ -1010,18 +1156,20 @@ function gate0_writeTestRows() {
         if (existing.has(res.canonical)) continue;
   
         const parsed = parseTitleCompany_((r.title || "").trim());
-  
-        roles.appendRow([
-          res.canonical,
-          parsed.company || res.companySlug || "",
-          parsed.job_title || (r.title || ""),
-          "brave_search",
-          new Date(),
-          "New",
-          query,
-          ats
-        ]);
-  
+
+        // Build row so each value goes in the correct column (sheet may have jd_text, etc. before ats)
+        const row = [];
+        for (let c = 0; c < numCols; c++) row.push("");
+        if (headerMap["canonical_url"]) row[headerMap["canonical_url"] - 1] = res.canonical;
+        if (headerMap["company"]) row[headerMap["company"] - 1] = parsed.company || res.companySlug || "";
+        if (headerMap["job_title"]) row[headerMap["job_title"] - 1] = parsed.job_title || (r.title || "");
+        if (headerMap["source"]) row[headerMap["source"] - 1] = "brave_search";
+        if (headerMap["discovered_date"]) row[headerMap["discovered_date"] - 1] = new Date();
+        if (headerMap["status"]) row[headerMap["status"] - 1] = "New";
+        if (headerMap["query"]) row[headerMap["query"] - 1] = query;
+        if (headerMap["ats"]) row[headerMap["ats"] - 1] = ats;
+        roles.appendRow(row);
+
         existing.add(res.canonical);
         written += 1;
       }

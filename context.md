@@ -208,6 +208,8 @@ Migrating out of Apps Script to Cursor so:
 - Search index results contain stale job URLs; 404 rates can be ~40–60%.
 - Treat 404 as Dead and stop retrying.
 - Brave paging is strict: offset is page number 0..9, count <= 20.
+- **FetchError TEXT_TOO_SHORT:** We couldn’t get enough JD text (e.g. Ashby API mismatch, JS-rendered page, thin page). We treat as retryable: use `gate3B_resetTextTooShortToNew()` then re-run Gate 3B; we do not auto-retry.
+- **Which rows came from which run:** `fetched_at` = when we last attempted this row (set for every row we process, success or fail). Rows touched in the same run share the same `fetched_at`. `enriched_at` = when we successfully enriched (only set for Enriched rows). Sort by `fetched_at` descending to see recent runs; filter by `failure_reason` to isolate TEXT_TOO_SHORT, etc.
 
 ---
 
