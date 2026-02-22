@@ -15,6 +15,20 @@
 
 ---
 
+## Where we are / What's next (assessment)
+
+**Current state:** Discovery (Brave catch-up + daily, split by source to avoid 6-min timeout), enrichment (Gate 3B, incl. Ashby API), scoring (Gate 4 v0). Roles sheet has ~364 rows from Lever/Ashby/Greenhouse. Path #2 (ATS feed) is implemented: discover from ATS APIs using companies already in the sheet, batched (18 companies per run) to stay under 6 min.
+
+**Limits we hit:** (1) Brave returns a finite slice per query; re-runs add ~0 when that slice is already in the sheet. (2) Apps Script 6-min limit: full catch-up and full ATS feed time out; we use per-source and batching. (3) ATS feed only sees companies we already have, so it doesn’t expand the *universe* of companies—it can add more roles at those companies.
+
+**Recommended next steps (in order):**
+1. **Stabilize and use what we have:** Run daily discovery (or per-source catch-up if you want a refresh), enrich, score. Use the shortlist; mark applied; decide Falcon sync (P1 #5).
+2. **Scoring and location:** Confirm location rules (PLAN “Location & work-site scoring”) and implement if you want (non-US listed location, US on-site tiers). Optionally run scoring audit (P2 #11) when you have a gold set.
+3. **Defer ATS feed as primary discovery:** Keep the ATS-feed code for later. Revisit when we have a **“top companies”** list (from fit score, manual list, or P2/P4 company-fit work); then use ATS feed as a **“watch these companies for new openings”** job, not as a way to find new companies.
+4. **Later:** Falcon sync script, custom-answers workflow (P3), company fit / cold outreach (P4).
+
+---
+
 ## Priority overview (this batch of questions)
 
 | P | Meaning | Items |
@@ -66,6 +80,14 @@
 - **Plan:** Document this as expected behavior or a known limitation; consider (later) ways to reduce or surface it: e.g. expected stale rate in context, discovery freshness (how old results we ingest are), optional HEAD/fetch at discovery time to mark likely-dead, or archiving/filtering by "last seen open". No code change required immediately—capture in plan for follow-up.
 - **Status:** Added to plan; follow-up TBD
 
+### 5f. Enrichment failures (HTTP_404, TEXT_TOO_SHORT): path to fixing and scoring
+- **Observed:** Of 363 total records, 95 HTTP_404 and 105 TEXT_TOO_SHORT. 404s are invalid/closed links; TEXT_TOO_SHORT are valid URLs where we did not get enough content (e.g. Ashby JS-rendered page, or stub/closed page returning 200).
+- **Scoring fix (done):** Gate 4 previously only scored rows with status **Enriched** and had a **cap of 100**. Now: (1) cap removed so **all** Enriched rows are scored; (2) rows with status **FetchError** and failure_reason **TEXT_TOO_SHORT** are also scored (using title, company, and whatever jd/loc/work we have) so you can review them. 404/Dead rows correctly remain unscored.
+- **Path to reducing failures:**  
+  - **HTTP_404:** Already handled (mark Dead, do not retry). To reduce rate: run discovery more frequently so we capture jobs before they are pulled; or accept some stale rate; or (later) optional HEAD at discovery time to skip likely-dead URLs.  
+  - **TEXT_TOO_SHORT:** (1) Improve Ashby API URL→board/slug matching so more Ashby jobs get full JD via API instead of raw fetch (see existing fetchAshbyJobDescription_ and URL parsing). (2) Use `gate3B_resetTextTooShortToNew()` then re-run Gate 3B to retry; some may succeed on retry. (3) For now they are scored for review so you can prioritize fixing or manual check.
+- **Status:** Gate 4 updated; path documented. Follow-up: audit Ashby matching for TEXT_TOO_SHORT rows, consider preserving short jd_text for scoring instead of clearing.
+
 ### 5c. Audit / test discovery coverage
 - **Question:** The Roles sheet (e.g. 258 rows) is not “all matching roles” across the three sites—it’s what Brave returned for our 3 queries, capped at ~140 (Lever) + 100 (Ashby) + 100 (Greenhouse) per run, and Brave only surfaces a subset of indexed pages. User has seen same-company, same-keyword roles that weren’t picked up. How to audit and test?
 - **Right way to audit:**
@@ -81,13 +103,13 @@
   1. **Max out Brave + query variations (stay with current approach):** Use **10 pages** for all three (200 max per query). Run **multiple queries per site** with different keyword emphasis. Each query gets its own 200; merge and dedupe.
   2. **Direct ATS discovery (fuller population):** See 5e below—sitemaps/feeds vs per-company, and why per-company is a poor fit when we don't have a company list.
 - **Recommendation (cost vs completeness):** Run Path #1 as a **one-time "catch up" run** (10 pages + multiple query variations per site) to build a much larger initial population. Then switch to a **lighter recurring process** (fewer queries, e.g. 1 query per site and 5–7 pages, optionally `freshness=pd` or `pw` for recent-only) so daily/weekly runs mainly pick up *new* postings without blowing Brave API cost. One-time cost for catch-up; low ongoing cost for maintenance.
-- **Status:** Done. Implemented: `gate3A_runAllSources_catchUp()` (10 pages, 3 Lever + 2 Ashby + 2 Greenhouse query variants); `gate3A_runAllSources_daily()` (6 pages, 1 query per site). Single-source `gate3A_braveSearchToRoles_*` kept for ad-hoc runs.
+- **Status:** Done. Implemented: `gate3A_runAllSources_catchUp()` (10 pages, 3 Lever + 2 Ashby + 2 Greenhouse query variants); `gate3A_runAllSources_daily()` (6 pages, 1 query per site). Single-source `gate3A_braveSearchToRoles_*` kept for ad-hoc runs. **Apps Script 6-min limit:** Full catch-up can time out; use `gate3A_runAllSources_catchUpLeverOnly()`, `catchUpAshbyOnly()`, `catchUpGreenhouseOnly()` in three separate runs to stay under the limit.
 
-### 5e. Path #2 (direct ATS): clarifying company list and API cost
-- **Company list concern:** Path #2 as "hit each company's listing page" *does* require knowing company identifiers (e.g. Lever's `{clientname}` in `api.lever.co/v0/postings/{clientname}`). We don't have that list—discovering which companies have fitting roles is part of the problem. So per-company discovery is a poor fit for initial coverage.
-- **API budget concern:** Per-company calls would be **direct HTTP to the ATS** (Lever/Ashby/Greenhouse), not Brave. So they wouldn't burn Brave API budget. But we'd still need to *get* the company list somehow (e.g. from our Brave-discovered rows over time, or from a third-party list), and then N companies = N requests to the ATS (rate limits and our own script time, not Brave cost).
-- **Better Path #2 angle—sitemaps / aggregate feeds:** Sitemaps at jobs.lever.co, boards.greenhouse.io returned 404; no single "all jobs" feed found. **Implemented instead:** company-list-from-sheet approach: derive unique (ats, company) from existing Roles URLs, then for each company call the ATS API (Lever postings API, Ashby job-board API, Greenhouse boards API) to get all jobs, filter by title keywords, append new URLs to the same sheet with source=ats_feed. No Brave cost; expands coverage at companies we already know. Gate 3B updated to enrich source=ats_feed rows. Run `gate3A_discoverFromAtsFeeds()` after Brave discovery (e.g. after catch-up or daily).
-- **Status:** Implemented. Use `gate3A_discoverFromAtsFeeds()` as an additive step; does not replace Brave discovery.
+### 5e. Path #2 (direct ATS): implemented; limited value now, better for "top companies watch" later
+- **Company list concern:** Path #2 requires knowing company identifiers. We derive them from existing Roles (URLs we already have). So we only poll companies we've already found—we don't discover *new* companies this way.
+- **What we implemented:** Company-list-from-sheet: for each (ats, company) in Roles, call Lever/Ashby/Greenhouse API, get all jobs, filter by title keywords, append new URLs with source=ats_feed. Batching added: maxCompanies (default 18), offset for next batch, to stay under 6-min limit. Per-source wrappers: `gate3A_discoverFromAtsFeedsLeverOnly()` etc. Logs: "Fetched X jobs, Y matched keywords, Z already in sheet, wrote W new."
+- **Assessment:** Limited value for *broad* discovery right now—we're only searching 18 companies at a time that we've already identified. **Higher value later:** when we have a **ranking of top potential companies** (from fit score, manual list, or P2/P4 company-fit work), use this same ATS-feed flow as a **"watch these companies for new openings"** job: maintain a curated (ats, company) list for top companies, run periodically (batched), filter by keywords, append new roles. So: keep the code; defer as primary discovery; revisit when we have a "top companies" workflow (see P2 #9, P4 #4 cold outreach).
+- **Status:** Implemented; use optionally. Prioritize when "top companies" list exists.
 
 **How to proceed (Path #1 vs Better Path #2):**
 
@@ -169,10 +191,9 @@
 
 ## Suggested order to work through (next steps)
 
-1. **P0:** Fix scoring bug (#10) for Non-US false positive; add brief README/note for Cursor "problems" (#12).
-2. **P1:** Audit search criteria (#2); document in context. Decide Falcon sync approach (#5) and add Applied columns to context schema.
-3. **P2:** Define scoring audit process (#11); when you share notes (#3), run a first pass and tune.
-4. **P3/P4:** After that, tackle Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), LinkedIn (#7), scale (#8), company fit (#9) as capacity allows.
+1. **Now:** Use current pipeline (daily or per-source Brave discovery → Gate 3B → Gate 4); shortlist and apply; decide Falcon sync (P1 #5).
+2. **P0/P2:** Implement location scoring rules when confirmed (P0 #10); optionally run scoring audit (P2 #11) when you have a gold set.
+3. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), LinkedIn (#7), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings" (5e).
 
 ---
 
@@ -220,4 +241,5 @@
 - **P0 #10 (follow-up):** Added analysis section "Location & work-site scoring (analysis)" and P1 item 5b (stale / job-not-found URLs). Location rules: non-US *listed* location → flag; US on-site tiers (Austin ok, NYC some, SF higher, elsewhere significant). Implementation deferred until rules confirmed.
 - **P1 #5a:** Documented discovery job-posting age: no freshness filter is applied (Brave API called without freshness param); intent for initial runs is to capture older-but-active roles (e.g. up to ~2 months); later can add optional freshness=pd/pw for recent-only runs. Comment added in JobDiscovery.ts.
 - **P1 #5c:** Documented why 258 ≠ “all matching roles” (Brave caps + search-index subset). Added context.md §3.4 and plan item 5c with audit process: company-level recall check (pick companies, count matching roles on board vs in sheet), optional Brave total logging.
+- **Feb 2026:** Added "Where we are / What's next"; context §3.5 (6-min limit, Brave vs ATS-feed per-source, ATS batching, Path #2 limited value now—better for future "top companies watch"). Plan 5e reframed; suggested order updated. ATS feed deferred as primary discovery until ranked top-companies list exists.
 - *(Add short lines here as we complete or change items.)*

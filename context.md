@@ -114,7 +114,7 @@ We worked in gates (prove each step works before scaling):
 - Enrichment throughput: ~25 per run takes ~1 minute.
 
 **Gate 4:** Scoring (v0 heuristic) (passed).
-- Title-based scoring + seniority adjustments added.
+- Title-based scoring + seniority adjustments added. All Enriched rows are scored (no cap). FetchError + TEXT_TOO_SHORT rows are also scored (title, company, any jd/loc/work) for review; Dead/404 are not scored.
 - Discovered scoring false negatives for US location detection and compensation extraction.
 - Scoring is okay for MVP but needs tuning and separation between “soft penalties” and “dealbreaker” logic.
 
@@ -131,6 +131,13 @@ The number of rows in the Roles sheet (e.g. 258) is **not** the total number of 
 3. **Dedupe:** We skip URLs already in the sheet, so repeat runs add only new discoveries.
 
 So the sheet is “what Brave gave us for these three queries, up to the page limits,” not “all matching roles.” To improve coverage we’d need different strategies (e.g. site-specific APIs/feeds, more or varied queries, or crawling ATS listing pages). Re-runs do not return "the next 140": we request the same pages each time; dedupe runs after we get results; Brave allows at most 10 pages (200 results) per query. To capture more: (a) use 10 pages and run multiple query variations per site (merge/dedupe), or (b) discover directly from the ATS. See PLAN.md 5c (audit) and 5d (how to capture more).
+
+### 3.5 Recent learnings (discovery, limits, Path #2 value)
+
+- **Apps Script 6-minute execution limit:** Custom function runs are capped at 6 minutes. Full catch-up (all sources, all query variants) and full ATS feed (all companies from sheet) both time out. We split into per-source runs (Brave: Lever-only, Ashby-only, Greenhouse-only) and ATS feed with **maxCompanies** (default 18) + **offset** so each run stays under 6 min.
+- **Brave vs ATS-feed "per source":** Two different things. (1) **Brave per-source** (`gate3A_runAllSources_catchUpLeverOnly`, etc.): same Brave search, one ATS at a time; use when full catch-up times out. (2) **ATS-feed per-source** (`gate3A_discoverFromAtsFeedsLeverOnly`, etc.): call Lever/Ashby/Greenhouse APIs for companies already in the sheet; use to add more roles at *known* companies. Do not confuse them.
+- **ATS feed in practice:** Company list comes only from existing Roles (parsed from URLs). So we only poll companies we have already found (e.g. via Brave). Runs with 48 Lever companies timed out; we added batching (18 companies per run, offset for next batch). Logs now report: Fetched X jobs, Y matched keywords, Z already in sheet, W wrote.
+- **Assessment of Path #2 (ATS feed) now:** Limited value for *broad* discovery—we are only querying companies we already have. Where it *is* valuable: once we have a **ranked list of top potential companies** (from scoring, manual curation, or "companies we would want to work at"), a **regular "watch these companies for new openings"** process can use the same ATS-feed logic: maintain a list of (ats, company) for top companies, run periodically (in batches if needed), filter by keywords, append new roles. So treat ATS feed as implemented but secondary for now; prioritize it when we have a "top companies" workflow (see PLAN.md P2/P4 company fit, cold outreach).
 
 ---
 

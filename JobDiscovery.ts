@@ -867,42 +867,44 @@ function gate0_writeTestRows() {
     if (lastRow < 2) return;
   
     const data = roles.getRange(2, 1, lastRow, roles.getLastColumn()).getValues();
+    const hasFailureReason = !!col["failure_reason"];
 
     let scored = 0;
-  
-    for (let r = 0; r < data.length; r++) {
-      const row = data[r];
-  
-      const status = (row[col["status"] - 1] || "").toString().trim();
-      if (status !== "Enriched") continue;
-  
-      const title = (row[col["job_title"] - 1] || "").toString();
-      const company = (row[col["company"] - 1] || "").toString();
-      const jd = (row[col["jd_text"] - 1] || "").toString();
-      const locRaw = (row[col["location_raw"] - 1] || "").toString();
-      const workHint = (row[col["work_mode_hint"] - 1] || "").toString();
-  
-      const scoreObj = scoreRoleV0_({ title, company, jd, locRaw, workHint });
-  
-      const sheetRow = r + 2;
+    let scoredFetchError = 0;
+
+    for (var r = 0; r < data.length; r++) {
+      var row = data[r];
+      var status = (row[col["status"] - 1] || "").toString().trim();
+      var failureReason = hasFailureReason ? (row[col["failure_reason"] - 1] || "").toString().trim() : "";
+
+      // Score Enriched rows; also score FetchError + TEXT_TOO_SHORT so valid links get a score for review
+      var eligible = (status === "Enriched") || (status === "FetchError" && failureReason === "TEXT_TOO_SHORT");
+      if (!eligible) continue;
+
+      var title = (row[col["job_title"] - 1] || "").toString();
+      var company = (row[col["company"] - 1] || "").toString();
+      var jd = (row[col["jd_text"] - 1] || "").toString();
+      var locRaw = (row[col["location_raw"] - 1] || "").toString();
+      var workHint = (row[col["work_mode_hint"] - 1] || "").toString();
+
+      var scoreObj = scoreRoleV0_({ title: title, company: company, jd: jd, locRaw: locRaw, workHint: workHint });
+
+      var sheetRow = r + 2;
       roles.getRange(sheetRow, col["fit_score"]).setValue(scoreObj.fit_score);
       roles.getRange(sheetRow, col["fit_notes"]).setValue(scoreObj.fit_notes);
       roles.getRange(sheetRow, col["dealbreaker_flag"]).setValue(scoreObj.dealbreaker_flag ? "TRUE" : "FALSE");
       roles.getRange(sheetRow, col["location_us_ok"]).setValue(scoreObj.location_us_ok);
       roles.getRange(sheetRow, col["comp_ok"]).setValue(scoreObj.comp_ok);
       roles.getRange(sheetRow, col["work_mode_final"]).setValue(scoreObj.work_mode_final);
-  
-      // rank_key lets you sort descending easily: score + tiebreaker
-      const rankKey = `${String(scoreObj.fit_score).padStart(3, "0")}-${company.toLowerCase()}-${title.toLowerCase()}`;
+
+      var rankKey = String(scoreObj.fit_score).padStart(3, "0") + "-" + company.toLowerCase() + "-" + title.toLowerCase();
       roles.getRange(sheetRow, col["rank_key"]).setValue(rankKey);
-  
+
       scored += 1;
-  
-      // keep runtime safe in MVP
-      if (scored >= 100) break;
+      if (status === "FetchError") scoredFetchError += 1;
     }
-  
-    logs.appendRow([new Date(), "Gate 4", `Scored ${scored} enriched roles (v0 heuristic).`]);
+
+    logs.appendRow([new Date(), "Gate 4", "Scored " + scored + " roles (v0 heuristic)" + (scoredFetchError > 0 ? ", " + scoredFetchError + " were FetchError+TEXT_TOO_SHORT" : "") + "."]);
   }
   
   /**
@@ -1273,7 +1275,7 @@ function gate0_writeTestRows() {
     'site:boards.greenhouse.io (job OR jobs) ("Strategic Finance" OR "Chief of Staff" OR "BizOps" OR "Head of Operations") -democorp'
   ];
 
-  /** One-time catch-up: 10 pages + all query variants per site. Run once to build a large initial set. */
+  /** One-time catch-up: 10 pages + all query variants per site. May exceed Apps Script 6-min limit; use catch-up-per-source below if it times out. */
   function gate3A_runAllSources_catchUp() {
     var pages = 10, q;
     for (q = 0; q < LEVER_QUERIES_.length; q++) {
@@ -1282,6 +1284,30 @@ function gate0_writeTestRows() {
     for (q = 0; q < ASHBY_QUERIES_.length; q++) {
       braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
     }
+    for (q = 0; q < GREENHOUSE_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
+    }
+  }
+
+  /** Catch-up Lever only — BRAVE discovery (~3 queries × 10 pages). Run separately to stay under 6-min limit. (For ATS API discovery, use gate3A_discoverFromAtsFeedsLeverOnly instead.) */
+  function gate3A_runAllSources_catchUpLeverOnly() {
+    var pages = 10, q;
+    for (q = 0; q < LEVER_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_lever_ });
+    }
+  }
+
+  /** Catch-up Ashby only — BRAVE discovery (~2 queries × 10 pages). Run separately to stay under 6-min limit. (For ATS API discovery, use gate3A_discoverFromAtsFeedsAshbyOnly instead.) */
+  function gate3A_runAllSources_catchUpAshbyOnly() {
+    var pages = 10, q;
+    for (q = 0; q < ASHBY_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
+    }
+  }
+
+  /** Catch-up Greenhouse only — BRAVE discovery (~2 queries × 10 pages). Run separately to stay under 6-min limit. (For ATS API discovery, use gate3A_discoverFromAtsFeedsGreenhouseOnly instead.) */
+  function gate3A_runAllSources_catchUpGreenhouseOnly() {
+    var pages = 10, q;
     for (q = 0; q < GREENHOUSE_QUERIES_.length; q++) {
       braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
     }
@@ -1401,9 +1427,12 @@ function gate0_writeTestRows() {
 
   /**
    * Better Path #2: discover jobs from ATS APIs using companies already in the Roles sheet.
-   * No Brave usage. Adds new rows with source=ats_feed. Run after Brave discovery to fill in more roles at known companies.
+   * No Brave usage. Adds new rows with source=ats_feed.
+   * @param {string} atsFilter - Optional. If "lever"|"ashby"|"greenhouse", only that ATS is run.
+   * @param {number} maxCompanies - Optional. Max companies to process this run (default 18). Use to stay under 6-min execution limit.
+   * @param {number} offset - Optional. Skip first N companies (default 0). Use for next batch: e.g. (20, 0) then (20, 20) then (20, 40).
    */
-  function gate3A_discoverFromAtsFeeds() {
+  function gate3A_discoverFromAtsFeeds(atsFilter, maxCompanies, offset) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var logs = ensureSheet_(ss, "Logs");
     var rolesAndMap = ensureRolesSchema_();
@@ -1413,11 +1442,20 @@ function gate0_writeTestRows() {
     var numCols = roles.getLastColumn();
     var written = 0;
     var companies = atsFeedGetCompaniesFromSheet_(roles, headerMap);
-    logs.appendRow([new Date(), "Gate 3A (ats_feed)", "Companies from sheet: " + companies.length]);
+    if (atsFilter === "lever" || atsFilter === "ashby" || atsFilter === "greenhouse") {
+      companies = companies.filter(function(c) { return c.ats === atsFilter; });
+    }
+    var off = (offset == null || isNaN(offset)) ? 0 : Math.max(0, parseInt(offset, 10));
+    var max = (maxCompanies == null || isNaN(maxCompanies)) ? 18 : Math.max(1, parseInt(maxCompanies, 10));
+    companies = companies.slice(off, off + max);
+    var logLabel = "Gate 3A (ats_feed" + (atsFilter ? " " + atsFilter + " only" : "") + ")";
+    logs.appendRow([new Date(), logLabel, "Companies this run: " + companies.length + " (offset " + off + ", max " + max + ")."]);
 
     var bannedLever = new Set(["lever", "democorp"]);
     var bannedAshby = new Set(["ashby", "demo", "democorp"]);
     var bannedGreenhouse = new Set(["democorp", "example"]);
+
+    var totalFetched = 0, totalMatched = 0, totalAlreadyInSheet = 0;
 
     for (var c = 0; c < companies.length; c++) {
       var ats = companies[c].ats;
@@ -1431,11 +1469,17 @@ function gate0_writeTestRows() {
       else if (ats === "ashby") jobs = atsFeedFetchAshbyJobs_(company);
       else if (ats === "greenhouse") jobs = atsFeedFetchGreenhouseJobs_(company);
 
+      totalFetched += jobs.length;
+
       for (var j = 0; j < jobs.length; j++) {
         var job = jobs[j];
         if (!atsFeedTitleMatches_(job.title, "")) continue;
+        totalMatched++;
         var canon = job.url;
-        if (existing.has(canon)) continue;
+        if (existing.has(canon)) {
+          totalAlreadyInSheet++;
+          continue;
+        }
         existing.add(canon);
         var row = [];
         for (var col = 0; col < numCols; col++) row.push("");
@@ -1451,5 +1495,20 @@ function gate0_writeTestRows() {
       }
       Utilities.sleep(200);
     }
-    logs.appendRow([new Date(), "Gate 3A (ats_feed)", "Wrote " + written + " new roles from " + companies.length + " companies."]);
+    logs.appendRow([new Date(), logLabel, "Fetched " + totalFetched + " jobs, " + totalMatched + " matched keywords, " + totalAlreadyInSheet + " already in sheet, wrote " + written + " new."]);
+  }
+
+  /** ATS feed: Lever only, max 18 companies per run to stay under 6-min limit. For next batch run gate3A_discoverFromAtsFeeds("lever", 18, 18) then ("lever", 18, 36), etc. */
+  function gate3A_discoverFromAtsFeedsLeverOnly() {
+    gate3A_discoverFromAtsFeeds("lever", 18, 0);
+  }
+
+  /** ATS feed: Ashby only, max 18 companies per run. For next batch use gate3A_discoverFromAtsFeeds("ashby", 18, 18), etc. */
+  function gate3A_discoverFromAtsFeedsAshbyOnly() {
+    gate3A_discoverFromAtsFeeds("ashby", 18, 0);
+  }
+
+  /** ATS feed: Greenhouse only, max 18 companies per run. For next batch use gate3A_discoverFromAtsFeeds("greenhouse", 18, 18), etc. */
+  function gate3A_discoverFromAtsFeedsGreenhouseOnly() {
+    gate3A_discoverFromAtsFeeds("greenhouse", 18, 0);
   }
