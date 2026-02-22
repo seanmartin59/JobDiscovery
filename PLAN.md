@@ -35,7 +35,7 @@
 |---|--------|--------|
 | **P0** | Fix now (incorrect behavior or confusion) | 10, 12 |
 | **P1** | Foundation (decisions + quick wins) | 1, 2, 5 |
-| **P2** | Scoring & prioritization (quality of fit) | 3, 9, 11 |
+| **P2** | Scoring & prioritization (quality of fit) | 3, 9, 11, 13 |
 | **P3** | Workflows & scripts (apply, custom answers) | 5 sync, 6 |
 | **P4** | Vision, scale, new sources | 4, 7, 8 |
 
@@ -148,6 +148,11 @@
 - **Goal:** Systematic way to improve scoring (not just ad hoc role-by-role).
 - **Approach:** (1) Define a small "gold set": 10–20 roles you label as clearly high-fit vs low-fit. (2) Run current scorer on them; compare scores to your labels. (3) Identify systematic errors (e.g. "Non-US" false positives, title misclassification). (4) Adjust heuristics and re-run. (5) Optionally: export a CSV of scored roles + key fields and have an AI or script suggest rule changes. Iterate. Document the process in `context.md` or this plan.
 - **Status:** Not started
+
+### 13. Score and prioritize: applied roles + archived (custom-questions) roles
+- **Goal:** Develop a process to score and prioritize two buckets so you can act on them: (1) **Roles you’ve applied to** — prioritize for **follow-up** (e.g. email/LinkedIn). (2) **Roles you’ve archived but not applied to** because they have custom questions — prioritize for **custom application** (draft answers, then apply).
+- **Approach:** (1) Ensure both buckets are identifiable in the sheet (e.g. Applied? = yes vs a separate “Archived / custom Q” flag or status). (2) Run fit_score (or a variant) on each bucket so they have a consistent score/rank. (3) Produce a simple view or export: e.g. “Applied, ranked by fit” (for follow-up priority) and “Archived / custom Q, ranked by fit” (for custom-application priority). (4) Optionally: link to P3 #6 (custom answers workflow) for drafting and to P4 follow-up for applied. No new discovery; this is scoring + prioritization of existing rows.
+- **Status:** Added to plan; not started
 
 ---
 

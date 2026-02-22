@@ -1079,6 +1079,7 @@ function gate0_writeTestRows() {
       query,               // full search query string
       count = 20,          // Brave per-page count (max 20)
       pages = 10,          // number of pages to fetch (max 10; offset 0..9)
+      freshness,           // optional: "pd" (24h), "pw" (7 days), "pm" (31 days), "py" (year)
       bannedHosts = [],    // extra exclusions
       urlFilterFn          // function(url) => { ok, companySlug?, canonical? }
     } = params;
@@ -1106,12 +1107,14 @@ function gate0_writeTestRows() {
     for (let page = 0; page <= offsetMax; page++) {
       const offset = page; // Brave offset is page index (0-9), not result start index
 
-      // No freshness param: we do not filter by job age. Keeps initial runs inclusive (e.g. roles posted up to ~2 months ago but still active). Later, optional freshness (pd/pw/pm/py) can be added for "recent only" runs.
-      const url =
+      var url =
         "https://api.search.brave.com/res/v1/web/search?q=" + encodeURIComponent(query) +
         "&count=" + safeCount +
         "&offset=" + offset +
         "&country=us&search_lang=en";
+      if (freshness === "pd" || freshness === "pw" || freshness === "pm" || freshness === "py") {
+        url += "&freshness=" + freshness;
+      }
   
       const resp = UrlFetchApp.fetch(url, {
         method: "get",
@@ -1175,9 +1178,11 @@ function gate0_writeTestRows() {
       }
     }
   
-    logs.appendRow([new Date(), `Gate 3A (${ats})`, `Query ran. pagesFetched=${pagesFetched}. Brave results=${totalResults}, candidates=${candidates}, wrote=${written}.`]);
+    var logMsg = "Query ran. pagesFetched=" + pagesFetched + ". Brave results=" + totalResults + ", candidates=" + candidates + ", wrote=" + written;
+    if (freshness) logMsg += " freshness=" + freshness;
+    logs.appendRow([new Date(), "Gate 3A (" + ats + ")", logMsg + "."]);
   }
-  
+
   function urlFilter_lever_(canonUrl) {
     const leverPostingRe =
       /^https:\/\/jobs\.lever\.co\/([^\/]+)\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i;
@@ -1313,12 +1318,22 @@ function gate0_writeTestRows() {
     }
   }
 
-  /** Recurring daily: 1 query per site, 6 pages. Use after catch-up to pick up new postings with lower Brave cost. */
+  /** Recurring daily: 1 query per site, 6 pages, past 7 days only. Use after catch-up to pick up new postings with lower Brave cost. */
   function gate3A_runAllSources_daily() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    logs.appendRow([new Date(), "Gate 3A (daily)", "Daily run started (freshness=pw, 6 pages per source)."]);
     var pages = 6;
-    braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_lever_ });
-    braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
-    braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
+    var freshness = "pw"; // past 7 days
+    try {
+      braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_lever_ });
+      braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_ashby_ });
+      braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_greenhouse_ });
+      logs.appendRow([new Date(), "Gate 3A (daily)", "Daily run completed."]);
+    } catch (e) {
+      logs.appendRow([new Date(), "Gate 3A (daily)", "Error: " + (e.message || String(e))]);
+      throw e;
+    }
   }
 
   // --- Better Path #2: discover from ATS APIs using company list derived from existing Roles (no Brave, no new company list). ---
