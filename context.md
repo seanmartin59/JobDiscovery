@@ -118,6 +118,20 @@ We worked in gates (prove each step works before scaling):
 - Discovered scoring false negatives for US location detection and compensation extraction.
 - Scoring is okay for MVP but needs tuning and separation between “soft penalties” and “dealbreaker” logic.
 
+### 3.3 Search criteria (discovery queries)
+
+Brave search queries used in Gate 3A: Lever, Ashby, and Greenhouse all use the same keyword set: **Strategy Operations, BizOps, Business Operations, Strategic Finance, Strategy, Operations** (with -democorp). So we do capture Strategic Finance. To add terms (e.g. Chief of Staff, GM), edit the query strings in gate3A_braveSearchToRoles_lever, _ashby, and _greenhouse.
+
+### 3.4 Discovery coverage (why the Roles count is not “all matching roles”)
+
+The number of rows in the Roles sheet (e.g. 258) is **not** the total number of currently posted roles across the three sites that match our keywords. It is:
+
+1. **Capped by the Brave API:** At most **10 pages × 20 results = 200 results per query**. Our config uses 7 pages for Lever (140 max), 5 for Ashby (100), 5 for Greenhouse (100), so **theoretical max ~340 new URLs per full run** (before dedupe).
+2. **Whatever Brave returns:** Brave is a **web search engine**. It only returns URLs it has indexed and ranks for our query. Many job pages that match our keywords may never appear in the first 7–10 pages (e.g. not indexed, or ranked on page 20). So we only ever see a **subset** of matching roles.
+3. **Dedupe:** We skip URLs already in the sheet, so repeat runs add only new discoveries.
+
+So the sheet is “what Brave gave us for these three queries, up to the page limits,” not “all matching roles.” To improve coverage we’d need different strategies (e.g. site-specific APIs/feeds, more or varied queries, or crawling ATS listing pages). Re-runs do not return "the next 140": we request the same pages each time; dedupe runs after we get results; Brave allows at most 10 pages (200 results) per query. To capture more: (a) use 10 pages and run multiple query variations per site (merge/dedupe), or (b) discover directly from the ATS. See PLAN.md 5c (audit) and 5d (how to capture more).
+
 ---
 
 ## 4) What Broke Recently (verified and fixed)

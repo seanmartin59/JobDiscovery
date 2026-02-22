@@ -596,10 +596,10 @@ function gate0_writeTestRows() {
       const source = row[baseCols.source-1];
       const jdTextExisting = row[headerMap["jd_text"]-1];
   
-      // Enrich any New row (include brave_search + blank source for legacy/misaligned rows)
+      // Enrich any New row (brave_search, ats_feed, or blank source for legacy)
       if (!url || status !== "New") continue;
       const src = (source != null && source !== "") ? String(source).trim() : "";
-      if (src && src !== "brave_search") continue; // skip known non-discovery sources (e.g. google_alert, test_email)
+      if (src && src !== "brave_search" && src !== "ats_feed") continue; // skip other sources (e.g. google_alert, test_email)
       // Only skip if we already have a real JD (length > 500). Short junk (e.g. "lever", "ashby", "greenhouse") stays eligible.
       const jdLen = (jdTextExisting != null && jdTextExisting !== "") ? String(jdTextExisting).trim().length : 0;
       if (jdLen > 500) continue;
@@ -959,10 +959,8 @@ function gate0_writeTestRows() {
     ];
     negTitle.forEach(x => { if (x.re.test(t)) { score += x.pts; notes.push(x.pts + " " + x.note); } });
   
-    // Location gate: US-only
-    // (Heuristic: flag common non-US city/country words. We'll improve later.)
-    const nonUsSignals = /(london|united kingdom|uk\b|england|europe|berlin|munich|paris|france|spain|madrid|barcelona|amsterdam|netherlands|canada|toronto|vancouver|india|bangalore|hyderabad|singapore|australia|sydney|melbourne)/i;
-    let location_us_ok = "UNKNOWN";
+    // Location gate: default US OK; only flag when role explicitly requires non-US location (e.g. "Location: London")
+    let location_us_ok = "TRUE";
   
       // Locale / language penalty (quick heuristic)
       // If title contains lots of non-ASCII characters, it’s likely not a US role.
@@ -971,16 +969,15 @@ function gate0_writeTestRows() {
         score -= 35;
         notes.push("-35 Non-English / non-ASCII title");
         // If it’s non-English, treat US-location as suspicious unless explicitly stated
-        if (location_us_ok === "UNKNOWN") location_us_ok = "FALSE";
+        location_us_ok = "FALSE";
       }
   
-    if (nonUsSignals.test(text)) {
+    // Only flag non-US when JD explicitly states role is based in / located in non-US (e.g. "Location: London")
+    const nonUsLocationRequired = /(location\s*[:\-]\s*(london|uk|england|europe|berlin|paris|dublin|india|singapore|australia|toronto|vancouver)|based\s+in\s+(our\s+)?(london|berlin|paris|dublin|toronto|sydney)\s|must\s+be\s+(based|located)\s+in\s+(the\s+)?(uk|eu|europe)|headquarters?\s+in\s+(london|berlin|paris)|role\s+is\s+in\s+(london|berlin|paris))/i;
+    if (nonUsLocationRequired.test(text)) {
       location_us_ok = "FALSE";
       score -= 40;
-      notes.push("-40 Non-US location signal");
-    } else if (/united states|u\.s\.|us\b|remote.*us|within the us|anywhere in the us|usa\b/i.test(text)) {
-      location_us_ok = "TRUE";
-      notes.push("+0 US location signal");
+      notes.push("-40 Non-US location required");
     }
   
     // Work mode
@@ -1107,6 +1104,7 @@ function gate0_writeTestRows() {
     for (let page = 0; page <= offsetMax; page++) {
       const offset = page; // Brave offset is page index (0-9), not result start index
 
+      // No freshness param: we do not filter by job age. Keeps initial runs inclusive (e.g. roles posted up to ~2 months ago but still active). Later, optional freshness (pd/pw/pm/py) can be added for "recent only" runs.
       const url =
         "https://api.search.brave.com/res/v1/web/search?q=" + encodeURIComponent(query) +
         "&count=" + safeCount +
@@ -1231,25 +1229,19 @@ function gate0_writeTestRows() {
   }
   
   function gate3A_braveSearchToRoles_lever() {
-    const query =
-      'site:jobs.lever.co ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp';
-  
     braveSearchToRoles_generic_({
       ats: "lever",
-      query,
-      count: 50,
+      query: LEVER_QUERIES_[0],
+      count: 20,
       pages: 7, // you’ve already seen this produce real volume
       urlFilterFn: urlFilter_lever_
     });
   }
   
   function gate3A_braveSearchToRoles_ashby() {
-    const query =
-      'site:jobs.ashbyhq.com ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp';
-  
     braveSearchToRoles_generic_({
       ats: "ashby",
-      query,
+      query: ASHBY_QUERIES_[0],
       count: 20,
       pages: 5,
       urlFilterFn: urlFilter_ashby_
@@ -1257,20 +1249,207 @@ function gate0_writeTestRows() {
   }
   
   function gate3A_braveSearchToRoles_greenhouse() {
-    const query =
-      'site:boards.greenhouse.io (job OR jobs) ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp';
-  
     braveSearchToRoles_generic_({
       ats: "greenhouse",
-      query,
+      query: GREENHOUSE_QUERIES_[0],
       count: 20,
       pages: 5,
       urlFilterFn: urlFilter_greenhouse_
     });
   }
   
+  // Query sets: first = main (daily); rest = variants (catch-up).
+  const LEVER_QUERIES_ = [
+    'site:jobs.lever.co ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp',
+    'site:jobs.lever.co ("Strategic Finance" OR "Chief of Staff" OR "GM" OR "General Manager" OR "Head of Business Operations") -democorp',
+    'site:jobs.lever.co ("BizOps" OR "Business Operations" OR "Operations Manager" OR "Head of Operations") -democorp'
+  ];
+  const ASHBY_QUERIES_ = [
+    'site:jobs.ashbyhq.com ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp',
+    'site:jobs.ashbyhq.com ("Strategic Finance" OR "Chief of Staff" OR "BizOps" OR "Head of Operations") -democorp'
+  ];
+  const GREENHOUSE_QUERIES_ = [
+    'site:boards.greenhouse.io (job OR jobs) ("Strategy Operations" OR "BizOps" OR "Business Operations" OR "Strategic Finance" OR "Strategy" OR "Operations") -democorp',
+    'site:boards.greenhouse.io (job OR jobs) ("Strategic Finance" OR "Chief of Staff" OR "BizOps" OR "Head of Operations") -democorp'
+  ];
+
+  /** One-time catch-up: 10 pages + all query variants per site. Run once to build a large initial set. */
+  function gate3A_runAllSources_catchUp() {
+    var pages = 10, q;
+    for (q = 0; q < LEVER_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_lever_ });
+    }
+    for (q = 0; q < ASHBY_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
+    }
+    for (q = 0; q < GREENHOUSE_QUERIES_.length; q++) {
+      braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[q], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
+    }
+  }
+
+  /** Recurring daily: 1 query per site, 6 pages. Use after catch-up to pick up new postings with lower Brave cost. */
   function gate3A_runAllSources_daily() {
-    gate3A_braveSearchToRoles_lever();
-    gate3A_braveSearchToRoles_ashby();
-    gate3A_braveSearchToRoles_greenhouse();
+    var pages = 6;
+    braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_lever_ });
+    braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
+    braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
+  }
+
+  // --- Better Path #2: discover from ATS APIs using company list derived from existing Roles (no Brave, no new company list). ---
+  const ATS_FEED_KEYWORDS_ = /strategy|operations|bizops|business operations|strategic finance|chief of staff|\bgm\b|general manager|head of operations|head of business/i;
+
+  /** Returns true if job title (and optional description snippet) matches our target role keywords. */
+  function atsFeedTitleMatches_(title, descriptionSnippet) {
+    var t = (title || "").toString();
+    var d = (descriptionSnippet || "").toString();
+    var combined = t + " " + d;
+    return ATS_FEED_KEYWORDS_.test(combined);
+  }
+
+  /** Collect unique (ats, companySlug) from existing Roles by parsing canonical_url. */
+  function atsFeedGetCompaniesFromSheet_(roles, headerMap) {
+    var lastRow = roles.getLastRow();
+    if (lastRow < 2) return [];
+    var urlCol = headerMap["canonical_url"];
+    var atsCol = headerMap["ats"];
+    if (!urlCol || !atsCol) return [];
+    var data = roles.getRange(2, 1, lastRow, roles.getLastColumn()).getValues();
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < data.length; i++) {
+      var url = (data[i][urlCol - 1] || "").toString().trim();
+      var ats = (data[i][atsCol - 1] || "").toString().toLowerCase().trim();
+      if (!url || !ats) continue;
+      var company = null;
+      if (ats === "lever") {
+        var m = url.match(/^https:\/\/jobs\.lever\.co\/([^\/]+)\//i);
+        if (m) company = (m[1] || "").toLowerCase();
+      } else if (ats === "ashby") {
+        var p = url.replace("https://jobs.ashbyhq.com/", "").split("/").filter(Boolean);
+        if (p.length >= 1) company = (p[0] || "").toLowerCase();
+      } else if (ats === "greenhouse") {
+        var g = url.replace("https://boards.greenhouse.io/", "").split("/").filter(Boolean);
+        if (g.length >= 1) company = (g[0] || "").toLowerCase();
+      }
+      if (!company) continue;
+      var key = ats + "\t" + company;
+      if (seen[key]) continue;
+      seen[key] = true;
+      out.push({ ats: ats, company: company });
+    }
+    return out;
+  }
+
+  /** Fetch all job postings from Lever for a site (paginated). Returns array of { url, title, company }. */
+  function atsFeedFetchLeverJobs_(site) {
+    var base = "https://api.lever.co/v0/postings/" + encodeURIComponent(site) + "?mode=json&limit=100";
+    var all = [];
+    var skip = 0;
+    while (true) {
+      var resp = UrlFetchApp.fetch(base + "&skip=" + skip, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+      if (resp.getResponseCode() !== 200) break;
+      var list = [];
+      try { list = JSON.parse(resp.getContentText()); } catch (e) { break; }
+      if (!Array.isArray(list) || list.length === 0) break;
+      for (var i = 0; i < list.length; i++) {
+        var j = list[i];
+        var url = (j.hostedUrl || "").toString().replace(/\/$/, "");
+        var title = (j.text || "").toString().trim();
+        if (url && url.indexOf("jobs.lever.co/") !== -1) all.push({ url: url, title: title, company: site });
+      }
+      if (list.length < 100) break;
+      skip += 100;
+    }
+    return all;
+  }
+
+  /** Fetch all jobs from Ashby job board. Returns array of { url, title, company }. */
+  function atsFeedFetchAshbyJobs_(boardName) {
+    var url = "https://api.ashbyhq.com/posting-api/job-board/" + encodeURIComponent(boardName);
+    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+    if (resp.getResponseCode() !== 200) return [];
+    var data = {};
+    try { data = JSON.parse(resp.getContentText()); } catch (e) { return []; }
+    var jobs = data.jobs || [];
+    var out = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var j = jobs[i];
+      var jobUrl = (j.jobUrl || "").toString().replace(/\/$/, "");
+      var title = (j.title || "").toString().trim();
+      if (jobUrl && jobUrl.indexOf("jobs.ashbyhq.com/") !== -1) out.push({ url: jobUrl, title: title, company: boardName });
+    }
+    return out;
+  }
+
+  /** Fetch all jobs from Greenhouse board. Returns array of { url, title, company }. */
+  function atsFeedFetchGreenhouseJobs_(boardToken) {
+    var url = "https://boards-api.greenhouse.io/v1/boards/" + encodeURIComponent(boardToken) + "/jobs";
+    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { "Accept": "application/json" } });
+    if (resp.getResponseCode() !== 200) return [];
+    var data = {};
+    try { data = JSON.parse(resp.getContentText()); } catch (e) { return []; }
+    var jobs = data.jobs || [];
+    var out = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var j = jobs[i];
+      var abs = (j.absolute_url || j.url || "").toString().replace(/\/$/, "");
+      var title = (j.title || "").toString().trim();
+      if (abs && abs.indexOf("boards.greenhouse.io/") !== -1) out.push({ url: abs, title: title, company: boardToken });
+    }
+    return out;
+  }
+
+  /**
+   * Better Path #2: discover jobs from ATS APIs using companies already in the Roles sheet.
+   * No Brave usage. Adds new rows with source=ats_feed. Run after Brave discovery to fill in more roles at known companies.
+   */
+  function gate3A_discoverFromAtsFeeds() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    var rolesAndMap = ensureRolesSchema_();
+    var roles = rolesAndMap.sheet;
+    var headerMap = rolesAndMap.headerMap;
+    var existing = new Set(getColumnValues_(roles, 1));
+    var numCols = roles.getLastColumn();
+    var written = 0;
+    var companies = atsFeedGetCompaniesFromSheet_(roles, headerMap);
+    logs.appendRow([new Date(), "Gate 3A (ats_feed)", "Companies from sheet: " + companies.length]);
+
+    var bannedLever = new Set(["lever", "democorp"]);
+    var bannedAshby = new Set(["ashby", "demo", "democorp"]);
+    var bannedGreenhouse = new Set(["democorp", "example"]);
+
+    for (var c = 0; c < companies.length; c++) {
+      var ats = companies[c].ats;
+      var company = companies[c].company;
+      if (ats === "lever" && bannedLever.has(company)) continue;
+      if (ats === "ashby" && bannedAshby.has(company)) continue;
+      if (ats === "greenhouse" && bannedGreenhouse.has(company)) continue;
+
+      var jobs = [];
+      if (ats === "lever") jobs = atsFeedFetchLeverJobs_(company);
+      else if (ats === "ashby") jobs = atsFeedFetchAshbyJobs_(company);
+      else if (ats === "greenhouse") jobs = atsFeedFetchGreenhouseJobs_(company);
+
+      for (var j = 0; j < jobs.length; j++) {
+        var job = jobs[j];
+        if (!atsFeedTitleMatches_(job.title, "")) continue;
+        var canon = job.url;
+        if (existing.has(canon)) continue;
+        existing.add(canon);
+        var row = [];
+        for (var col = 0; col < numCols; col++) row.push("");
+        if (headerMap["canonical_url"]) row[headerMap["canonical_url"] - 1] = canon;
+        if (headerMap["company"]) row[headerMap["company"] - 1] = job.company;
+        if (headerMap["job_title"]) row[headerMap["job_title"] - 1] = job.title;
+        if (headerMap["source"]) row[headerMap["source"] - 1] = "ats_feed";
+        if (headerMap["discovered_date"]) row[headerMap["discovered_date"] - 1] = new Date();
+        if (headerMap["status"]) row[headerMap["status"] - 1] = "New";
+        if (headerMap["ats"]) row[headerMap["ats"] - 1] = ats;
+        roles.appendRow(row);
+        written++;
+      }
+      Utilities.sleep(200);
+    }
+    logs.appendRow([new Date(), "Gate 3A (ats_feed)", "Wrote " + written + " new roles from " + companies.length + " companies."]);
   }
