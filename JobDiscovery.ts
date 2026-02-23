@@ -599,7 +599,7 @@ function gate0_writeTestRows() {
       // Enrich any New row (brave_search, ats_feed, or blank source for legacy)
       if (!url || status !== "New") continue;
       const src = (source != null && source !== "") ? String(source).trim() : "";
-      if (src && src !== "brave_search" && src !== "ats_feed") continue; // skip other sources (e.g. google_alert, test_email)
+      if (src && src !== "brave_search" && src !== "ats_feed" && src !== "serpapi_google_jobs") continue; // skip other sources (e.g. google_alert, test_email)
       // Only skip if we already have a real JD (length > 500). Short junk (e.g. "lever", "ashby", "greenhouse") stays eligible.
       const jdLen = (jdTextExisting != null && jdTextExisting !== "") ? String(jdTextExisting).trim().length : 0;
       if (jdLen > 500) continue;
@@ -695,8 +695,8 @@ function gate0_writeTestRows() {
         failed += 1;
       }
   
-      // Safety cap: stay under Apps Script 6-min limit (~2s per fetch → ~50 is safe)
-      if ((enriched + failed) >= 50) break;
+      // Safety cap: stay under Apps Script 6-min limit (~2s per fetch → ~120 is safe with margin)
+      if ((enriched + failed) >= 120) break;
     }
   
     logs.appendRow([new Date(),"Gate 3B",`Scanned=${scanned}, enriched=${enriched}, failed=${failed}.`]);
@@ -1537,13 +1537,14 @@ function gate0_writeTestRows() {
   // ============================================================================
 
   const SERPAPI_QUERIES_CATCHUP_ = [
-    '("Strategy Operations" OR "BizOps" OR "Business Operations")',
-    '("Strategic Finance" OR "Chief of Staff")',
-    '("Head of Operations" OR "General Manager" OR "Head of Business Operations")'
+    '"strategy & operations" OR "strategy operations" OR "strategic operations" OR "strategy & ops"',
+    '"business operations" OR "bizops" OR "biz ops"',
+    '"strategic finance" OR "chief of staff"',
+    '"head of operations" OR "director of operations" OR "VP operations" OR "head of business operations"'
   ];
 
   const SERPAPI_QUERY_DAILY_ =
-    '("Strategy Operations" OR "Strategic Finance" OR "BizOps" OR "Business Operations" OR "Chief of Staff" OR "Head of Operations")';
+    '"strategy & operations" OR "strategic finance" OR "bizops" OR "business operations" OR "chief of staff" OR "head of operations"';
 
   /**
    * Strip utm_* and google_jobs_apply tracking params from a URL for cleaner dedup.
@@ -1569,27 +1570,77 @@ function gate0_writeTestRows() {
   }
 
   /**
-   * Given an apply_options array from a SerpAPI Google Jobs result, pick the best
-   * canonical URL and determine the ATS. Priority: lever > ashby > greenhouse > linkedin > first available.
+   * Normalize a company name to a lowercase slug for fuzzy matching against ATS URL slugs.
+   * "The MITRE Corporation" -> "mitre", "Tonic AI" -> "tonicai", "Blue Bottle Coffee" -> "bluebottlecoffee"
    */
-  function pickBestApplyUrl_(applyOptions) {
+  function companyToSlug_(name) {
+    if (!name) return "";
+    return name.toLowerCase()
+      .replace(/^the\s+/i, "")
+      .replace(/\s*(inc\.?|llc\.?|ltd\.?|corp\.?|corporation|company|co\.?|group)\s*$/i, "")
+      .replace(/[^a-z0-9]/g, "");
+  }
+
+  /**
+   * Check if an ATS URL slug plausibly matches a company name.
+   * Extracts the company portion from the URL, normalizes both, and checks if
+   * one contains the other (handles cases like "tonicai" matching "Tonic AI").
+   */
+  function atsUrlMatchesCompany_(url, companyName) {
+    var slug = "";
+    if (url.indexOf("jobs.lever.co/") >= 0) {
+      var after = url.split("jobs.lever.co/")[1] || "";
+      slug = (after.split("/")[0] || "").toLowerCase();
+    } else if (url.indexOf("jobs.ashbyhq.com/") >= 0) {
+      var after = url.split("jobs.ashbyhq.com/")[1] || "";
+      slug = (after.split("/")[0] || "").toLowerCase();
+    } else if (url.indexOf("boards.greenhouse.io/") >= 0) {
+      var after = url.split("boards.greenhouse.io/")[1] || "";
+      slug = (after.split("/")[0] || "").toLowerCase();
+    }
+    if (!slug) return false;
+
+    var normalizedCompany = companyToSlug_(companyName);
+    if (!normalizedCompany) return false;
+
+    slug = slug.replace(/[^a-z0-9]/g, "");
+
+    return slug.indexOf(normalizedCompany) >= 0
+      || normalizedCompany.indexOf(slug) >= 0;
+  }
+
+  /**
+   * Given an apply_options array from a SerpAPI Google Jobs result, pick the best
+   * canonical URL and determine the ATS. Validates that ATS URLs actually belong to the
+   * same company (Google Jobs apply_options can contain cross-links to other companies).
+   * Priority: company-matching ATS URL (lever > ashby > greenhouse) > linkedin > first available.
+   */
+  function pickBestApplyUrl_(applyOptions, companyName) {
     if (!applyOptions || !applyOptions.length) return { url: null, ats: "unknown" };
 
-    var leverUrl = null, ashbyUrl = null, greenhouseUrl = null, linkedinUrl = null;
+    var matchedLever = null, matchedAshby = null, matchedGreenhouse = null, linkedinUrl = null;
 
     for (var i = 0; i < applyOptions.length; i++) {
       var link = (applyOptions[i].link || "").toString();
       var clean = stripTrackingParams_(link).replace(/\/$/, "");
 
-      if (!leverUrl && clean.indexOf("jobs.lever.co/") >= 0) leverUrl = clean;
-      if (!ashbyUrl && clean.indexOf("jobs.ashbyhq.com/") >= 0) ashbyUrl = clean;
-      if (!greenhouseUrl && clean.indexOf("boards.greenhouse.io/") >= 0) greenhouseUrl = clean;
-      if (!linkedinUrl && clean.indexOf("linkedin.com/jobs/") >= 0) linkedinUrl = clean;
+      if (!matchedLever && clean.indexOf("jobs.lever.co/") >= 0 && atsUrlMatchesCompany_(clean, companyName)) {
+        matchedLever = clean;
+      }
+      if (!matchedAshby && clean.indexOf("jobs.ashbyhq.com/") >= 0 && atsUrlMatchesCompany_(clean, companyName)) {
+        matchedAshby = clean;
+      }
+      if (!matchedGreenhouse && clean.indexOf("boards.greenhouse.io/") >= 0 && atsUrlMatchesCompany_(clean, companyName)) {
+        matchedGreenhouse = clean;
+      }
+      if (!linkedinUrl && clean.indexOf("linkedin.com/jobs/") >= 0) {
+        linkedinUrl = clean;
+      }
     }
 
-    if (leverUrl) return { url: leverUrl, ats: "lever" };
-    if (ashbyUrl) return { url: ashbyUrl, ats: "ashby" };
-    if (greenhouseUrl) return { url: greenhouseUrl, ats: "greenhouse" };
+    if (matchedLever) return { url: matchedLever, ats: "lever" };
+    if (matchedAshby) return { url: matchedAshby, ats: "ashby" };
+    if (matchedGreenhouse) return { url: matchedGreenhouse, ats: "greenhouse" };
     if (linkedinUrl) return { url: linkedinUrl, ats: "linkedin" };
 
     var fallback = stripTrackingParams_((applyOptions[0].link || "").toString()).replace(/\/$/, "");
@@ -1670,7 +1721,7 @@ function gate0_writeTestRows() {
 
       for (var j = 0; j < jobs.length; j++) {
         var job = jobs[j];
-        var picked = pickBestApplyUrl_(job.apply_options);
+        var picked = pickBestApplyUrl_(job.apply_options, job.company_name);
         if (!picked.url) continue;
 
         candidates++;
@@ -1719,22 +1770,17 @@ function gate0_writeTestRows() {
     ]);
   }
 
-  /** One-time catch-up: 3 keyword-group queries, ~2 months lookback, max 15 pages each. Est. ~30-45 credits. */
+  /** One-time catch-up: 3 keyword-group queries, no date filter, max 15 pages each. Broader keywords to maximize coverage. */
   function gate3A_serpApiCatchUp() {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var logs = ensureSheet_(ss, "Logs");
-    logs.appendRow([new Date(), "Gate 3A (serpapi catch-up)", "Catch-up started (" + SERPAPI_QUERIES_CATCHUP_.length + " queries, 15 pages max each)."]);
-
-    var twoMonthsAgo = new Date();
-    twoMonthsAgo.setDate(twoMonthsAgo.getDate() - 60);
-    var afterDate = twoMonthsAgo.toISOString().split("T")[0];
+    logs.appendRow([new Date(), "Gate 3A (serpapi catch-up)", "Catch-up started (" + SERPAPI_QUERIES_CATCHUP_.length + " queries, 15 pages max each, no date filter)."]);
 
     try {
       for (var i = 0; i < SERPAPI_QUERIES_CATCHUP_.length; i++) {
         serpApiGoogleJobsToRoles_({
           query: SERPAPI_QUERIES_CATCHUP_[i],
           maxPages: 15,
-          afterDate: afterDate,
           logLabel: "Gate 3A (serpapi catch-up q" + (i + 1) + ")"
         });
       }
@@ -1745,26 +1791,146 @@ function gate0_writeTestRows() {
     }
   }
 
-  /** Daily SerpAPI discovery: 1 combined OR query, 3-day lookback, adaptive pagination. Est. ~3-5 credits/day. */
+  /**
+   * Periodic SerpAPI discovery: 4 split keyword queries, no date filter (dedup handles freshness).
+   * Each query gets its own ~10-20 result set from Google Jobs, maximizing coverage.
+   * maxPages: 5 per query (Google Jobs typically caps at ~2 pages, 5 gives headroom).
+   * Est. ~8-10 credits per run. Run every 2-7 days depending on budget.
+   */
   function gate3A_serpApiDaily() {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var logs = ensureSheet_(ss, "Logs");
-    logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Daily run started."]);
-
-    var threeDaysAgo = new Date();
-    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-    var afterDate = threeDaysAgo.toISOString().split("T")[0];
+    logs.appendRow([new Date(), "Gate 3A (serpapi)", "Run started (" + SERPAPI_QUERIES_CATCHUP_.length + " queries, 5 pages max each, no date filter)."]);
 
     try {
-      serpApiGoogleJobsToRoles_({
-        query: SERPAPI_QUERY_DAILY_,
-        maxPages: 10,
-        afterDate: afterDate,
-        logLabel: "Gate 3A (serpapi daily)"
-      });
-      logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Daily run completed."]);
+      for (var i = 0; i < SERPAPI_QUERIES_CATCHUP_.length; i++) {
+        serpApiGoogleJobsToRoles_({
+          query: SERPAPI_QUERIES_CATCHUP_[i],
+          maxPages: 5,
+          logLabel: "Gate 3A (serpapi q" + (i + 1) + ")"
+        });
+      }
+      logs.appendRow([new Date(), "Gate 3A (serpapi)", "Run completed."]);
     } catch (e) {
-      logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Error: " + (e.message || String(e))]);
+      logs.appendRow([new Date(), "Gate 3A (serpapi)", "Error: " + (e.message || String(e))]);
       throw e;
     }
+  }
+
+  /**
+   * Diagnostic: compare result counts with/without date filter AND with broader keywords.
+   * Runs 3 queries x 1 page each = 3 credits. Does NOT write to Roles -- just logs counts.
+   */
+  function gate3A_serpApiDiagnostic() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    var label = "Gate 3A (serpapi DIAG)";
+
+    var apiKey = PropertiesService.getScriptProperties().getProperty("SERPAPI_KEY");
+    if (!apiKey) throw new Error("Missing SERPAPI_KEY in Script Properties.");
+
+    var sixtyDaysAgo = new Date();
+    sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+    var afterDate = sixtyDaysAgo.toISOString().split("T")[0];
+
+    var tests = [
+      { name: "Original (narrow + after)", q: '("Strategy Operations" OR "BizOps" OR "Business Operations") after:' + afterDate },
+      { name: "Original (narrow, NO after)", q: '("Strategy Operations" OR "BizOps" OR "Business Operations")' },
+      { name: "Broader (no after)", q: '(strategy operations OR strategic operations OR "strategy & operations" OR "strategy & ops" OR bizops OR "biz ops" OR "business operations" OR "strategic planning" operations)' }
+    ];
+
+    logs.appendRow([new Date(), label, "Diagnostic started. Running " + tests.length + " queries x 1 page each = " + tests.length + " credits."]);
+
+    for (var t = 0; t < tests.length; t++) {
+      var apiUrl = "https://serpapi.com/search?engine=google_jobs"
+        + "&q=" + encodeURIComponent(tests[t].q)
+        + "&gl=us&hl=en&api_key=" + apiKey;
+      var response = UrlFetchApp.fetch(apiUrl, { muteHttpExceptions: true });
+      var data = JSON.parse(response.getContentText());
+      var jobs = data.jobs_results || [];
+      var hasNext = !!(data.serpapi_pagination && data.serpapi_pagination.next_page_token);
+      var titles = [];
+      for (var j = 0; j < Math.min(3, jobs.length); j++) {
+        titles.push(jobs[j].title + " @ " + jobs[j].company_name);
+      }
+      logs.appendRow([new Date(), label,
+        tests[t].name + ": " + jobs.length + " results on page 1, has_next_page=" + hasNext
+        + ". Sample: " + titles.join(" | ")
+      ]);
+      Utilities.sleep(300);
+    }
+    logs.appendRow([new Date(), label, "Diagnostic completed. " + tests.length + " credits used."]);
+  }
+
+  /**
+   * Minimal test: 1 query x 1 page = 1 SerpAPI credit. Validates API key, response parsing,
+   * URL extraction, and sheet writing. Check Logs sheet for detailed output before running catch-up.
+   */
+  function gate3A_serpApiTest() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    var label = "Gate 3A (serpapi TEST)";
+    logs.appendRow([new Date(), label, "Test started. Using 1 credit (1 query x 1 page)."]);
+
+    var apiKey = PropertiesService.getScriptProperties().getProperty("SERPAPI_KEY");
+    if (!apiKey) {
+      logs.appendRow([new Date(), label, "FAIL: Missing SERPAPI_KEY in Script Properties."]);
+      throw new Error("Missing SERPAPI_KEY in Script Properties.");
+    }
+
+    var query = '"Strategy Operations" OR "Strategic Finance"';
+    var apiUrl = "https://serpapi.com/search?engine=google_jobs"
+      + "&q=" + encodeURIComponent(query)
+      + "&gl=us&hl=en"
+      + "&api_key=" + apiKey;
+
+    var response;
+    try {
+      response = UrlFetchApp.fetch(apiUrl, { muteHttpExceptions: true });
+    } catch (e) {
+      logs.appendRow([new Date(), label, "FAIL: Fetch error: " + (e.message || String(e))]);
+      throw e;
+    }
+
+    var code = response.getResponseCode();
+    if (code !== 200) {
+      logs.appendRow([new Date(), label, "FAIL: HTTP " + code + ": " + response.getContentText().substring(0, 300)]);
+      throw new Error("SerpAPI returned HTTP " + code);
+    }
+
+    var data = JSON.parse(response.getContentText());
+    var jobs = data.jobs_results || [];
+    logs.appendRow([new Date(), label, "OK: HTTP 200. jobs_results count=" + jobs.length
+      + ". Has next_page_token=" + !!(data.serpapi_pagination && data.serpapi_pagination.next_page_token)]);
+
+    var details = [];
+    for (var i = 0; i < jobs.length; i++) {
+      var job = jobs[i];
+      var picked = pickBestApplyUrl_(job.apply_options, job.company_name);
+      var postedAt = (job.detected_extensions && job.detected_extensions.posted_at) || "n/a";
+      var via = job.via || "n/a";
+      var applyCount = (job.apply_options || []).length;
+
+      details.push(
+        (i + 1) + ". " + (job.title || "?") + " @ " + (job.company_name || "?")
+        + " | loc=" + (job.location || "?")
+        + " | posted=" + postedAt
+        + " | via=" + via
+        + " | apply_options=" + applyCount
+        + " | picked_url=" + (picked.url || "NONE")
+        + " | ats=" + picked.ats
+      );
+    }
+
+    for (var d = 0; d < details.length; d++) {
+      logs.appendRow([new Date(), label, details[d]]);
+    }
+
+    serpApiGoogleJobsToRoles_({
+      query: query,
+      maxPages: 1,
+      logLabel: label
+    });
+
+    logs.appendRow([new Date(), label, "Test completed. Check Logs above for details and Roles sheet for new rows."]);
   }

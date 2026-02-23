@@ -220,10 +220,46 @@
 - **Approach:** Treat as roadmap. Break into phases: (Phase 1) current pipeline + apply tracking + sync to Falcon. (Phase 2) Custom answers workflow and "apply above threshold" automation. (Phase 3) Follow-up and cold outreach. Capture in `context.md` as "Desired next state" or "Roadmap" and refine here as we go.
 - **Status:** Captured; to be reflected in context.md
 
-### 7. LinkedIn ingestion
-- **Question:** How to ingest from LinkedIn; it's an aggregator and may have roles not on our three boards.
-- **Options (research):** (a) LinkedIn API / official products (often restricted, paid). (b) Scraping (ToS and reliability issues). (c) LinkedIn job alerts -> email -> parse (similar to Google Alerts flow). (d) Third-party job aggregators that include LinkedIn (e.g. Adzuna, Indeed API) and may be easier to integrate. (e) Manual: export or paste from LinkedIn into a sheet for scoring. Document options and constraints (ToS, cost, stability) before choosing.
-- **Status:** Research backlog
+### 7. LinkedIn ingestion (next priority after SerpAPI)
+- **Question:** How to ingest from LinkedIn; it's the largest job listings platform and has roles not on Lever/Ashby/Greenhouse.
+- **Research completed (Feb 2026).** Options evaluated:
+  - (a) **LinkedIn API:** Requires partnership agreement; not available for individual use. Dead end.
+  - (b) **Scraping:** Against LinkedIn ToS; actively detected/blocked; LinkedIn has sued scrapers. Not recommended.
+  - (c) **LinkedIn job alerts -> email -> parse:** **Winner.** Free, legitimate (LinkedIn built this feature), and we already have the Gate 1 pattern for parsing job URLs from email. Could add 20-50+ roles/day.
+  - (d) **Aggregators that include LinkedIn (SerpAPI, Adzuna):** SerpAPI Google Jobs already surfaces some LinkedIn jobs (`via: "LinkedIn"` in results), but only a small fraction. Adzuna untested but may add more.
+  - (e) **Manual:** Not scalable.
+- **Decision: Option (c) -- LinkedIn Job Alerts -> Email -> Apps Script parse.**
+- **Implementation plan:**
+  1. User sets up 4-6 LinkedIn job alerts (one per keyword group: "Strategy & Operations", "Strategic Finance", "Chief of Staff", "BizOps", "Head of Operations", "Director of Operations").
+  2. LinkedIn sends daily email digests to the user's Gmail.
+  3. Build `gate1_ingestLinkedInAlerts()` function in JobDiscovery.ts -- same pattern as existing `gate1A_ingestGoogleAlerts_lever_proof()`: scan Gmail for LinkedIn alert emails, extract job URLs, canonicalize, dedupe against Roles sheet, write new rows with source=`linkedin_alert`, ats=`linkedin`.
+  4. LinkedIn alert emails contain job title, company, location, and a `linkedin.com/jobs/view/...` URL. Extract all of these.
+  5. Enrichment (Gate 3B) and scoring (Gate 4) work unchanged on the new rows.
+- **Advantages over other sources:**
+  - LinkedIn has the largest job index, including roles posted only on LinkedIn (not on any ATS board).
+  - LinkedIn's alert algorithm does relevance filtering for us (at zero API cost).
+  - No API credits consumed. No rate limits. No cost.
+  - Captures LinkedIn-exclusive listings that SerpAPI/Brave/ATS APIs can never reach.
+- **Limitations:**
+  - LinkedIn controls what appears in alerts (not guaranteed exhaustive).
+  - Email format may change over time (parsing could break; fixable).
+  - Requires user to set up alerts manually (one-time).
+  - Volume depends on LinkedIn's alert frequency and how many jobs they include per email.
+- **Status:** Planned; implement immediately after SerpAPI integration is stable.
+
+### 7b. ATS URL resolver for HTTP_403 roles (Phase 2)
+- **Problem:** SerpAPI discovers jobs across the entire web, but many canonical URLs point to aggregator sites (Indeed, ZipRecruiter, Monster, Talent.com, Jobrapido, etc.) that return HTTP_403 when we try to fetch the JD. These roles have title, company, and location from SerpAPI but no JD text, limiting scoring accuracy.
+- **Observed:** ~30 out of 120 SerpAPI roles failed with HTTP_403 in the first enrichment run (Feb 2026).
+- **Solution:** Build a `gate3B_resolveAtsUrls()` function that:
+  1. Finds rows with `failure_reason = "HTTP_403"` (or similar blocked statuses).
+  2. For each, takes the company name and attempts to find the company's ATS board:
+     - Construct candidate URLs: `https://jobs.lever.co/{slug}`, `https://jobs.ashbyhq.com/{slug}`, `https://boards.greenhouse.io/{slug}` using `companyToSlug_()`.
+     - Probe each URL. If a board exists, search it for a job title match.
+     - If found, swap the canonical URL to the ATS URL and reset status to "New" for re-enrichment.
+  3. For companies not on Lever/Ashby/Greenhouse, leave as-is (score with limited data).
+- **Complexity:** Medium. Requires fuzzy title matching and slug guessing (some companies use non-obvious slugs).
+- **Priority:** After LinkedIn ingestion. The 403 roles are still scored (with less precision); this is an accuracy improvement, not a blocker.
+- **Status:** Planned.
 
 ### 8. Scalability -- when does the sheet break?
 - **Question:** At what point does the Google Sheet become insufficient, and what to do?
@@ -234,11 +270,12 @@
 
 ## Suggested order to work through (next steps)
 
-1. **Now:** Implement SerpAPI Google Jobs integration (section 6.6). Sign up (free), build functions, run catch-up, then daily. Validate freshness and ATS coverage vs Brave.
-2. **After SerpAPI integration:** Enrich + score SerpAPI-discovered roles. Compare liveness vs Brave results. If materially better, promote SerpAPI to primary and demote Brave.
-3. **P0/P2:** Implement location scoring rules when confirmed (P0 #10); optionally run scoring audit (P2 #11) when you have a gold set.
-4. **Phase 2 hybrid:** If SerpAPI validates well, extract company slugs from results -> build Companies list -> ATS API polling for depth at known companies.
-5. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), LinkedIn (#7), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings" (5e).
+1. **Now:** Finish SerpAPI Google Jobs integration. Enrich + score SerpAPI-discovered roles. Compare liveness vs Brave results. Set up daily runner.
+2. **Next:** LinkedIn job alerts ingestion (#7). Set up alerts, build `gate1_ingestLinkedInAlerts()`, start capturing LinkedIn-exclusive roles. Highest-volume free source available.
+3. **Then:** ATS URL resolver (#7b). Recover JD text for HTTP_403 roles by finding original ATS postings. Improves scoring accuracy for ~25% of SerpAPI results.
+4. **P0/P2:** Implement location scoring rules when confirmed (#10); optionally run scoring audit (#11) when you have a gold set.
+5. **Phase 2 hybrid:** Extract company slugs from SerpAPI + LinkedIn results -> build Companies list -> ATS API polling for depth at known companies.
+6. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings".
 
 ---
 
@@ -511,6 +548,16 @@ Strip tracking params (`utm_campaign`, `utm_source`, `utm_medium`) from URLs bef
 - For daily runs with `after:` filtering (last 2-3 days), total new postings are likely small enough that the cap is not a problem.
 - For catch-up, using 3 separate keyword-group queries (not 1 combined) mitigates the ranking/cap issue.
 - No single source captures every role in existence; the hybrid approach (aggregator + ATS APIs for known companies) provides the best combined coverage at $0.
+
+#### Query tuning (to revisit)
+
+- **"General Manager" excluded for now.** First catch-up returned mostly fast-food/retail GMs (KFC, Taco Bell, Wendy's, etc.). The term is valid in tech/startup context (e.g. "General Manager, Marketplace") but has extremely low signal-to-noise. **Revisit later:** add back with exclusions (e.g. `"general manager" -restaurant -food -retail -store -hotel -salon -automotive -dealership`) once the pipeline is stable and we can evaluate whether scoring alone is sufficient to filter noise or whether query-level exclusion is needed.
+- **Keyword broadening (done).** Initial catch-up used strict exact-match phrases (e.g. `"Strategy Operations"`) which missed common variants like "Strategy & Operations", "Strategy & Ops", "Strategic Operations". Queries broadened to include these variants. Catch-up `after:` date filter also removed (was limiting results).
+- **Split queries over combined (done).** Google Jobs caps at ~10-20 results per query regardless of pagination depth. A single combined OR query wastes this cap by mixing all keywords into one result set. Switched daily runner from 1 combined query to 4 separate keyword-group queries (same as catch-up), each getting its own ~10-20 results. Net effect: ~4x more unique results for the same or slightly more credits.
+- **Date filter removed from daily (done).** The `after:` filter was reducing the result set. Deduplication handles freshness (only new URLs get written), so the date filter was redundant.
+- **Run cadence: weekly is fine.** At ~8-10 credits per run and 250 credits/month, weekly runs use ~32-40 credits/month, leaving plenty of budget for catch-up runs or experimentation. Google Jobs results shift over time as new jobs are posted, so each weekly run will surface new roles even without a date filter.
+- **Location-targeted queries (future).** SerpAPI supports a `location` parameter that shifts Google Jobs results by geography. Adding runs targeted at "Austin, TX" and "Remote" could surface roles not appearing in the default (US-wide) results. Deferred for now because location data is not always reliable, but worth testing later. Each location variant costs ~2 credits (1 query x ~2 pages).
+- **Future tuning:** Monitor results for additional keyword gaps (e.g., titles that don't match any current query but should). Consider adding: `"operations lead"`, `"operations manager" strategy`, `"GM" tech OR startup`, or company/industry-specific terms.
 
 ---
 
