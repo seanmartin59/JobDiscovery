@@ -141,6 +141,21 @@ So the sheet is “what Brave gave us for these three queries, up to the page li
 - **ATS feed in practice:** Company list comes only from existing Roles (parsed from URLs). So we only poll companies we have already found (e.g. via Brave). Runs with 48 Lever companies timed out; we added batching (18 companies per run, offset for next batch). Logs now report: Fetched X jobs, Y matched keywords, Z already in sheet, W wrote.
 - **Assessment of Path #2 (ATS feed) now:** Limited value for *broad* discovery—we are only querying companies we already have. Where it *is* valuable: once we have a **ranked list of top potential companies** (from scoring, manual curation, or "companies we would want to work at"), a **regular "watch these companies for new openings"** process can use the same ATS-feed logic: maintain a list of (ats, company) for top companies, run periodically (in batches if needed), filter by keywords, append new roles. So treat ATS feed as implemented but secondary for now; prioritize it when we have a "top companies" workflow (see PLAN.md P2/P4 company fit, cold outreach).
 
+### 3.6 SerpAPI Google Jobs integration (Feb 2026)
+
+- **Decision:** Replace Brave as primary discovery with SerpAPI Google Jobs (free tier: 250 searches/month, $0/month).
+- **Why:** Google Jobs is purpose-built for job search; aggregates from Lever, Ashby, Greenhouse, LinkedIn, Indeed, ZipRecruiter, etc. Returns structured data: `title`, `company_name`, `location`, `detected_extensions.posted_at`, and `apply_options` with direct ATS URLs. Supports query operators (`OR`, `after:`, quoted phrases, grouping). Likely much fresher than Brave's general web index for job pages.
+- **Key optimization:** Combined OR queries (all keywords in one query) reduce credit usage by ~80%. One combined query per daily run instead of 5-6 separate queries.
+- **Functions added to JobDiscovery.ts:**
+  - `serpApiGoogleJobsToRoles_(params)` -- core function; calls SerpAPI, extracts best ATS URL from `apply_options`, deduplicates against existing sheet, writes new rows with source=`serpapi_google_jobs`.
+  - `gate3A_serpApiCatchUp()` -- one-time catch-up: 3 keyword-group queries, ~2 month lookback (`after:` operator), max 15 pages each. Est. ~30-45 credits.
+  - `gate3A_serpApiDaily()` -- daily: 1 combined OR query, 3-day lookback, max 10 pages (adaptive -- stops when results exhausted). Est. ~3-5 credits/day.
+- **Script property required:** `SERPAPI_KEY` (from free serpapi.com account).
+- **URL canonicalization:** From `apply_options`, prioritize lever > ashby > greenhouse > linkedin > other. Strip `utm_*` tracking params for cleaner dedup.
+- **Existing Brave functions untouched.** Gate 3B enrichment and Gate 4 scoring work on all rows regardless of source.
+- **Coverage note:** Google Jobs has an implicit result cap per query (~100-200 results). For daily `after:` filtered runs (last 2-3 days), new postings are likely small enough to capture fully. For catch-up, 3 separate queries mitigate keyword-dominance in ranking.
+- **See PLAN.md section 6.4-6.6** for full decision rationale, implementation spec, and credit budget.
+
 ---
 
 ## 4) What Broke Recently (verified and fixed)

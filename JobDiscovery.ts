@@ -1531,3 +1531,240 @@ function gate0_writeTestRows() {
   function gate3A_discoverFromAtsFeedsGreenhouseOnly() {
     gate3A_discoverFromAtsFeeds("greenhouse", 18, 0);
   }
+
+  // ============================================================================
+  // Gate 3A: SerpAPI Google Jobs discovery (replaces Brave as primary discovery)
+  // ============================================================================
+
+  const SERPAPI_QUERIES_CATCHUP_ = [
+    '("Strategy Operations" OR "BizOps" OR "Business Operations")',
+    '("Strategic Finance" OR "Chief of Staff")',
+    '("Head of Operations" OR "General Manager" OR "Head of Business Operations")'
+  ];
+
+  const SERPAPI_QUERY_DAILY_ =
+    '("Strategy Operations" OR "Strategic Finance" OR "BizOps" OR "Business Operations" OR "Chief of Staff" OR "Head of Operations")';
+
+  /**
+   * Strip utm_* and google_jobs_apply tracking params from a URL for cleaner dedup.
+   */
+  function stripTrackingParams_(url) {
+    try {
+      var idx = url.indexOf("?");
+      if (idx === -1) return url;
+      var base = url.substring(0, idx);
+      var query = url.substring(idx + 1);
+      var pairs = query.split("&");
+      var kept = [];
+      for (var i = 0; i < pairs.length; i++) {
+        var key = pairs[i].split("=")[0].toLowerCase();
+        if (key.indexOf("utm_") === 0) continue;
+        if (key === "source" && pairs[i].toLowerCase().indexOf("google_jobs") >= 0) continue;
+        kept.push(pairs[i]);
+      }
+      return kept.length > 0 ? base + "?" + kept.join("&") : base;
+    } catch (e) {
+      return url;
+    }
+  }
+
+  /**
+   * Given an apply_options array from a SerpAPI Google Jobs result, pick the best
+   * canonical URL and determine the ATS. Priority: lever > ashby > greenhouse > linkedin > first available.
+   */
+  function pickBestApplyUrl_(applyOptions) {
+    if (!applyOptions || !applyOptions.length) return { url: null, ats: "unknown" };
+
+    var leverUrl = null, ashbyUrl = null, greenhouseUrl = null, linkedinUrl = null;
+
+    for (var i = 0; i < applyOptions.length; i++) {
+      var link = (applyOptions[i].link || "").toString();
+      var clean = stripTrackingParams_(link).replace(/\/$/, "");
+
+      if (!leverUrl && clean.indexOf("jobs.lever.co/") >= 0) leverUrl = clean;
+      if (!ashbyUrl && clean.indexOf("jobs.ashbyhq.com/") >= 0) ashbyUrl = clean;
+      if (!greenhouseUrl && clean.indexOf("boards.greenhouse.io/") >= 0) greenhouseUrl = clean;
+      if (!linkedinUrl && clean.indexOf("linkedin.com/jobs/") >= 0) linkedinUrl = clean;
+    }
+
+    if (leverUrl) return { url: leverUrl, ats: "lever" };
+    if (ashbyUrl) return { url: ashbyUrl, ats: "ashby" };
+    if (greenhouseUrl) return { url: greenhouseUrl, ats: "greenhouse" };
+    if (linkedinUrl) return { url: linkedinUrl, ats: "linkedin" };
+
+    var fallback = stripTrackingParams_((applyOptions[0].link || "").toString()).replace(/\/$/, "");
+    return { url: fallback, ats: "other" };
+  }
+
+  /**
+   * Core SerpAPI Google Jobs discovery function. Calls SerpAPI, extracts job data,
+   * picks the best ATS apply URL from each result, deduplicates, and writes to the Roles sheet.
+   *
+   * @param {Object} params
+   *   query      - search query string (supports OR, "...", after:YYYY-MM-DD)
+   *   maxPages   - max pages to fetch (default 15; each page = 1 SerpAPI credit, 10 results)
+   *   afterDate  - optional ISO date string (e.g. "2026-02-17") to append after: filter
+   *   logLabel   - label for Logs sheet (e.g. "Gate 3A (serpapi daily)")
+   */
+  function serpApiGoogleJobsToRoles_(params) {
+    var query = params.query;
+    var maxPages = params.maxPages || 15;
+    var afterDate = params.afterDate || null;
+    var logLabel = params.logLabel || "Gate 3A (serpapi)";
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    var rolesAndMap = ensureRolesSchema_();
+    var roles = rolesAndMap.sheet;
+    var headerMap = rolesAndMap.headerMap;
+
+    var apiKey = PropertiesService.getScriptProperties().getProperty("SERPAPI_KEY");
+    if (!apiKey) throw new Error("Missing SERPAPI_KEY in Script Properties. Sign up free at serpapi.com.");
+
+    var existing = new Set(getColumnValues_(roles, 1));
+    var numCols = roles.getLastColumn();
+
+    var fullQuery = query;
+    if (afterDate) fullQuery += " after:" + afterDate;
+
+    var totalResults = 0;
+    var candidates = 0;
+    var written = 0;
+    var pagesFetched = 0;
+    var nextPageToken = null;
+
+    for (var page = 0; page < maxPages; page++) {
+      var apiUrl = "https://serpapi.com/search?engine=google_jobs"
+        + "&q=" + encodeURIComponent(fullQuery)
+        + "&gl=us&hl=en"
+        + "&api_key=" + apiKey;
+      if (nextPageToken) {
+        apiUrl += "&next_page_token=" + encodeURIComponent(nextPageToken);
+      }
+
+      var response;
+      try {
+        response = UrlFetchApp.fetch(apiUrl, { muteHttpExceptions: true });
+      } catch (e) {
+        logs.appendRow([new Date(), logLabel, "Fetch error on page " + page + ": " + (e.message || String(e))]);
+        break;
+      }
+
+      var code = response.getResponseCode();
+      if (code !== 200) {
+        logs.appendRow([new Date(), logLabel, "HTTP " + code + " on page " + page + ": " + response.getContentText().substring(0, 200)]);
+        break;
+      }
+
+      var data;
+      try {
+        data = JSON.parse(response.getContentText());
+      } catch (e) {
+        logs.appendRow([new Date(), logLabel, "JSON parse error on page " + page]);
+        break;
+      }
+
+      pagesFetched++;
+      var jobs = data.jobs_results || [];
+      totalResults += jobs.length;
+
+      for (var j = 0; j < jobs.length; j++) {
+        var job = jobs[j];
+        var picked = pickBestApplyUrl_(job.apply_options);
+        if (!picked.url) continue;
+
+        candidates++;
+        if (existing.has(picked.url)) continue;
+
+        existing.add(picked.url);
+        var row = [];
+        for (var col = 0; col < numCols; col++) row.push("");
+
+        if (headerMap["canonical_url"]) row[headerMap["canonical_url"] - 1] = picked.url;
+        if (headerMap["company"]) row[headerMap["company"] - 1] = job.company_name || "";
+        if (headerMap["job_title"]) row[headerMap["job_title"] - 1] = job.title || "";
+        if (headerMap["source"]) row[headerMap["source"] - 1] = "serpapi_google_jobs";
+        if (headerMap["discovered_date"]) row[headerMap["discovered_date"] - 1] = new Date();
+        if (headerMap["status"]) row[headerMap["status"] - 1] = "New";
+        if (headerMap["query"]) row[headerMap["query"] - 1] = fullQuery;
+        if (headerMap["ats"]) row[headerMap["ats"] - 1] = picked.ats;
+        if (headerMap["location_raw"]) row[headerMap["location_raw"] - 1] = job.location || "";
+
+        roles.appendRow(row);
+        written++;
+      }
+
+      var pagination = data.serpapi_pagination;
+      if (pagination && pagination.next_page_token) {
+        nextPageToken = pagination.next_page_token;
+      } else {
+        break;
+      }
+
+      Utilities.sleep(300);
+    }
+
+    var postedAges = [];
+    var jobsOnLastPage = (data && data.jobs_results) ? data.jobs_results : [];
+    for (var k = 0; k < jobsOnLastPage.length; k++) {
+      var ext = jobsOnLastPage[k].detected_extensions;
+      if (ext && ext.posted_at) postedAges.push(ext.posted_at);
+    }
+    var ageSample = postedAges.length > 0 ? " Last page posted_at sample: " + postedAges.slice(0, 3).join(", ") + "." : "";
+
+    logs.appendRow([new Date(), logLabel,
+      "pagesFetched=" + pagesFetched + ". SerpAPI results=" + totalResults
+      + ", candidates=" + candidates + ", wrote=" + written
+      + ". Credits used=" + pagesFetched + "." + ageSample
+    ]);
+  }
+
+  /** One-time catch-up: 3 keyword-group queries, ~2 months lookback, max 15 pages each. Est. ~30-45 credits. */
+  function gate3A_serpApiCatchUp() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    logs.appendRow([new Date(), "Gate 3A (serpapi catch-up)", "Catch-up started (" + SERPAPI_QUERIES_CATCHUP_.length + " queries, 15 pages max each)."]);
+
+    var twoMonthsAgo = new Date();
+    twoMonthsAgo.setDate(twoMonthsAgo.getDate() - 60);
+    var afterDate = twoMonthsAgo.toISOString().split("T")[0];
+
+    try {
+      for (var i = 0; i < SERPAPI_QUERIES_CATCHUP_.length; i++) {
+        serpApiGoogleJobsToRoles_({
+          query: SERPAPI_QUERIES_CATCHUP_[i],
+          maxPages: 15,
+          afterDate: afterDate,
+          logLabel: "Gate 3A (serpapi catch-up q" + (i + 1) + ")"
+        });
+      }
+      logs.appendRow([new Date(), "Gate 3A (serpapi catch-up)", "Catch-up completed."]);
+    } catch (e) {
+      logs.appendRow([new Date(), "Gate 3A (serpapi catch-up)", "Error: " + (e.message || String(e))]);
+      throw e;
+    }
+  }
+
+  /** Daily SerpAPI discovery: 1 combined OR query, 3-day lookback, adaptive pagination. Est. ~3-5 credits/day. */
+  function gate3A_serpApiDaily() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Daily run started."]);
+
+    var threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    var afterDate = threeDaysAgo.toISOString().split("T")[0];
+
+    try {
+      serpApiGoogleJobsToRoles_({
+        query: SERPAPI_QUERY_DAILY_,
+        maxPages: 10,
+        afterDate: afterDate,
+        logLabel: "Gate 3A (serpapi daily)"
+      });
+      logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Daily run completed."]);
+    } catch (e) {
+      logs.appendRow([new Date(), "Gate 3A (serpapi daily)", "Error: " + (e.message || String(e))]);
+      throw e;
+    }
+  }
