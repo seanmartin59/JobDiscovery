@@ -132,6 +132,8 @@ The number of rows in the Roles sheet (e.g. 258) is **not** the total number of 
 
 So the sheet is “what Brave gave us for these three queries, up to the page limits,” not “all matching roles.” To improve coverage we’d need different strategies (e.g. site-specific APIs/feeds, more or varied queries, or crawling ATS listing pages). Re-runs do not return "the next 140": we request the same pages each time; dedupe runs after we get results; Brave allows at most 10 pages (200 results) per query. To capture more: (a) use 10 pages and run multiple query variations per site (merge/dedupe), or (b) discover directly from the ATS. See PLAN.md 5c (audit) and 5d (how to capture more).
 
+**Brave freshness:** Brave's `freshness` (pd/pw/pm/py) filters by when the engine last crawled the page, not job post date. With `freshness=pw` many job boards return 0 results. Daily discovery runs without freshness; dedupe avoids re-adding same roles. See PLAN.md 5g.
+
 ### 3.5 Recent learnings (discovery, limits, Path #2 value)
 
 - **Apps Script 6-minute execution limit:** Custom function runs are capped at 6 minutes. Full catch-up (all sources, all query variants) and full ATS feed (all companies from sheet) both time out. We split into per-source runs (Brave: Lever-only, Ashby-only, Greenhouse-only) and ATS feed with **maxCompanies** (default 18) + **offset** so each run stays under 6 min.

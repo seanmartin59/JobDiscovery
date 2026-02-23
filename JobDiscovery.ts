@@ -1103,6 +1103,7 @@ function gate0_writeTestRows() {
     let candidates = 0;
     let written = 0;
     let pagesFetched = 0;
+    let moreResultsAvailable = null;
 
     for (let page = 0; page <= offsetMax; page++) {
       const offset = page; // Brave offset is page index (0-9), not result start index
@@ -1135,9 +1136,12 @@ function gate0_writeTestRows() {
   
       const data = JSON.parse(bodyText);
       const results = (data.web && data.web.results) ? data.web.results : [];
+      if (data.web && data.web.query && typeof data.web.query.more_results_available === "boolean") {
+        moreResultsAvailable = data.web.query.more_results_available;
+      }
       pagesFetched += 1;
       totalResults += results.length;
-  
+
       if (!results.length) break;
   
       for (const r of results) {
@@ -1180,6 +1184,7 @@ function gate0_writeTestRows() {
   
     var logMsg = "Query ran. pagesFetched=" + pagesFetched + ". Brave results=" + totalResults + ", candidates=" + candidates + ", wrote=" + written;
     if (freshness) logMsg += " freshness=" + freshness;
+    if (moreResultsAvailable === true) logMsg += " (Brave has more results beyond page " + (pagesFetched - 1) + ")";
     logs.appendRow([new Date(), "Gate 3A (" + ats + ")", logMsg + "."]);
   }
 
@@ -1318,17 +1323,16 @@ function gate0_writeTestRows() {
     }
   }
 
-  /** Recurring daily: 1 query per site, 6 pages, past 7 days only. Use after catch-up to pick up new postings with lower Brave cost. */
+  /** Recurring daily: 1 query per site, 10 pages (max Brave allows). No freshness (Brave freshness = page crawl date, not job post date). Dedupe by URL keeps sheet from re-adding same roles; 10 pages maximizes chance of new roles on later pages. */
   function gate3A_runAllSources_daily() {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var logs = ensureSheet_(ss, "Logs");
-    logs.appendRow([new Date(), "Gate 3A (daily)", "Daily run started (freshness=pw, 6 pages per source)."]);
-    var pages = 6;
-    var freshness = "pw"; // past 7 days
+    logs.appendRow([new Date(), "Gate 3A (daily)", "Daily run started (10 pages per source, no freshness)."]);
+    var pages = 10;
     try {
-      braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_lever_ });
-      braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_ashby_ });
-      braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[0], count: 20, pages: pages, freshness: freshness, urlFilterFn: urlFilter_greenhouse_ });
+      braveSearchToRoles_generic_({ ats: "lever", query: LEVER_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_lever_ });
+      braveSearchToRoles_generic_({ ats: "ashby", query: ASHBY_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_ashby_ });
+      braveSearchToRoles_generic_({ ats: "greenhouse", query: GREENHOUSE_QUERIES_[0], count: 20, pages: pages, urlFilterFn: urlFilter_greenhouse_ });
       logs.appendRow([new Date(), "Gate 3A (daily)", "Daily run completed."]);
     } catch (e) {
       logs.appendRow([new Date(), "Gate 3A (daily)", "Error: " + (e.message || String(e))]);

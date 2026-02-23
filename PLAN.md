@@ -22,10 +22,11 @@
 **Limits we hit:** (1) Brave returns a finite slice per query; re-runs add ~0 when that slice is already in the sheet. (2) Apps Script 6-min limit: full catch-up and full ATS feed time out; we use per-source and batching. (3) ATS feed only sees companies we already have, so it doesn’t expand the *universe* of companies—it can add more roles at those companies.
 
 **Recommended next steps (in order):**
-1. **Stabilize and use what we have:** Run daily discovery (or per-source catch-up if you want a refresh), enrich, score. Use the shortlist; mark applied; decide Falcon sync (P1 #5).
-2. **Scoring and location:** Confirm location rules (PLAN “Location & work-site scoring”) and implement if you want (non-US listed location, US on-site tiers). Optionally run scoring audit (P2 #11) when you have a gold set.
-3. **Defer ATS feed as primary discovery:** Keep the ATS-feed code for later. Revisit when we have a **“top companies”** list (from fit score, manual list, or P2/P4 company-fit work); then use ATS feed as a **“watch these companies for new openings”** job, not as a way to find new companies.
-4. **Later:** Falcon sync script, custom-answers workflow (P3), company fit / cold outreach (P4).
+1. **Fix daily discovery (5g):** Daily run with `freshness=pw` returns 0 results because Brave freshness = page crawl date, not job post date. Remove or relax freshness for daily so new runs return results; document in context.
+2. **Stabilize and use what we have:** Run daily (or per-source catch-up), enrich, score. Use the shortlist; mark applied; decide Falcon sync (P1 #5). Be aware of staleness (5b): many URLs dead at apply time; run discovery more often to improve.
+3. **Scoring and location:** Confirm location rules (PLAN “Location & work-site scoring”) and implement if you want (non-US listed location, US on-site tiers). Optionally run scoring audit (P2 #11) when you have a gold set.
+4. **Defer ATS feed as primary discovery:** Keep the ATS-feed code for later. Revisit when we have a **“top companies”** list (from fit score, manual list, or P2/P4 company-fit work); then use ATS feed as a **“watch these companies for new openings”** job, not as a way to find new companies.
+5. **Later:** Falcon sync script, custom-answers workflow (P3), company fit / cold outreach (P4).
 
 ---
 
@@ -69,16 +70,54 @@
 - **Status:** Done
 
 ### 5a. Discovery: job posting age (freshness filter)
-- **Current behavior:** **No age filter is applied.** The active discovery path (`braveSearchToRoles_generic_`) calls the Brave Web Search API **without** a `freshness` parameter. Brave returns results by its default (relevance; recency behavior is up to the engine). So we are not prematurely filtering out older-but-still-active postings.
-- **Brave API option:** If we did pass `freshness`, supported values are: `pd` = past 24h, `pw` = past 7 days, `pm` = past 31 days, `py` = past year (or custom date range).
-- **Intent for initial runs:** Capture anything still active and a good fit—including roles posted up to ~2 months ago (TBD). Keep **no** freshness param (or explicitly use `pm` / `py` if we want to force a wide window). Do **not** use `pd`/`pw` until we’re ready to limit to “recent only” (e.g. daily runs).
-- **Later:** When switching to “recent only,” add an optional `freshness` param to the generic Brave call (e.g. `freshness: "pd"` or `"pw"`) and document in plan/context.
-- **Status:** Documented; no code change for now (current behavior is correct for initial runs)
+- **Current behavior:** Catch-up runs use **no** freshness. Daily run uses `freshness=pw` (past 7 days) to target “new” postings.
+- **Brave API:** Supported values: `pd` = past 24h, `pw` = past 7 days, `pm` = past 31 days, `py` = past year. **Important:** Brave’s `freshness` filters by **when the search engine last crawled/updated the page**, not by “when the job was posted.” Many ATS job listing pages are not re-crawled every 7 days, so with `freshness=pw` Brave can return **0 results** even though there are many new jobs—the pages simply haven’t been re-indexed in the last week.
+- **Intent for initial/catch-up:** No freshness (capture older-but-active). For daily, see 5g below.
+- **Status:** Documented; daily zero-results issue tracked in 5g
 
-### 5b. Discovery: many captured URLs return "job not found"
-- **Observation:** A large share (close to half) of URLs captured in the discovery process return some form of "job not found" (or equivalent) when visiting the URL. This is a data-quality / freshness issue, not a code bug per se.
-- **Plan:** Document this as expected behavior or a known limitation; consider (later) ways to reduce or surface it: e.g. expected stale rate in context, discovery freshness (how old results we ingest are), optional HEAD/fetch at discovery time to mark likely-dead, or archiving/filtering by "last seen open". No code change required immediately—capture in plan for follow-up.
-- **Status:** Added to plan; follow-up TBD
+### 5g. Gate 3A daily: zero results with freshness=pw (assessment + fix)
+- **User observation:** Gate 3A run across all sources returned Brave results=0, candidates=0, wrote=0 for Lever, Ashby, and Greenhouse. It is not plausible that there are zero job postings in the past week across all companies using these ATSs; something must be broken.
+- **Assessment:** Our code (query, URL, filters) is consistent with catch-up runs that do return results. The difference is **daily uses `freshness=pw`**. Brave’s freshness applies to **page crawl/index date**, not job post date. So we are not filtering “jobs posted in last 7 days”—we are filtering “pages Brave has updated in its index in the last 7 days.” For many job boards, that set is empty or tiny → 0 results. **Conclusion:** Likely **not** a bug in our code; it’s Brave API semantics. Daily run is over-filtering.
+- **Next steps:** (1) **Change daily run:** Remove `freshness` for daily, or use a looser value (`pm` or `py`), so daily actually returns results. (2) **Optional:** Add a one-off test: same query with and without `freshness=pw`; confirm we get results without it. (3) Document in context that Brave freshness = crawl date, not job post date; “recent only” may require different strategy (e.g. run without freshness and rely on dedupe + discovery_date, or use `pm`).
+- **Status:** Assessment done; daily now runs without freshness (see 5h).
+
+### 5h. Gate 3A: what we changed, how we capture new roles, dedupe, and open questions
+
+**What we changed in 3A (summary):**
+- **Daily run:** Removed `freshness=pw` (it returned 0 results; Brave freshness = page crawl date, not job post date). Daily now runs with no freshness, same as catch-up. Added start/completion/error logging to Logs sheet.
+- **Catch-up vs daily:** Catch-up = 10 pages × multiple query variants per site (3 Lever, 2 Ashby, 2 Greenhouse). Daily = 1 query per site; we use 6 pages (see below for 10-page option). Both dedupe by URL after retrieval.
+
+**How we try to capture new roles (and not just the same expired list):**
+- We run **without freshness** so Brave returns whatever it ranks (we don’t over-filter to 0). “New to us” = URLs not already in the sheet; we write those and set `discovered_date` so you can sort/filter by when we first saw them.
+- We **run discovery regularly** (e.g. daily). Each run re-queries Brave; if Brave’s index has updated and new job pages appear in the first N pages, we’ll see them and add them (dedupe skips URLs we already have).
+- We do **not** have “job posted date” from Brave; we only have “when we first saw this URL” (`discovered_date`). So “new” means “new to our sheet,” not “posted in last 7 days.” To get true “posted recently” we’d need ATS APIs or page-level posted-date parsing.
+
+**If Brave keeps the same order every time (same roles on pages 1–6):**
+- Then the same ~120 URLs (6 pages × 20) come back each run; almost all are already in the sheet → we write 0 new. **New roles** that appear on Brave would have to show up in pages 1–N (Brave’s ranking would need to change). We can’t ask Brave to “exclude these URLs” or “give us only new.”
+- **What we do:** (1) Request **up to 10 pages** for daily (same max as catch-up) so we scan the full slice Brave allows; new roles that enter Brave’s index might appear on page 7–10. (2) Use **multiple query variants** on catch-up so different query emphasis can surface different URLs. (3) Run **often** so when Brave’s ranking or index changes we pick up new URLs quickly.
+
+**Deduplication: “prior to retrieval” vs “after retrieval”:**
+- **We cannot dedupe before calling Brave.** The Brave API does not accept a list of URLs to exclude. We must request pages 0–9 and get back whatever Brave returns.
+- **We dedupe after retrieval:** Before any Brave call we load all existing `canonical_url` values from the Roles sheet into a Set. For each result URL we canonicalize, check the Set; if present we skip (don’t write). So we **never write the same role twice**; we do “pull” the same URLs in the API response (and use quota) but we don’t add duplicate rows. The only way to avoid “pulling” known URLs would be if Brave supported exclusion; it doesn’t.
+- **Optional optimization:** Stop requesting further pages when a page is 100% already in sheet (early exit to save quota). Tradeoff: if Brave sometimes puts new roles on page 5–6, we’d miss them. So we prefer “request all 10 pages for daily” over “early exit” for maximum chance of new roles.
+
+**Other questions to consider (objectives: as many new, relevant roles as possible, as often and as soon as possible):**
+1. **Run frequency:** Run Gate 3A daily (or twice daily) so we see new postings soon after Brave indexes them.
+2. **Daily page count:** Use 10 pages for daily (not 6) so we don’t miss new roles that appear on pages 7–10; we already dedupe so we only write new URLs.
+3. **Brave’s ranking:** We don’t control it. New jobs might rank lower; running 10 pages and often helps. Option: log `data.web.query.more_results_available` (if present) to see when Brave has more results we’re not requesting.
+4. **Query variants on daily:** Catch-up uses 3+2+2 queries; daily uses 1 per site. Adding a second query per site on daily could surface different URLs (same 10-page limit per query).
+5. **Staleness:** Many discovered URLs are already closed (404 or dead when user clicks). Run discovery more often to capture sooner; consider optional HEAD before surfacing for apply (5b).
+6. **“True” new roles:** To prioritize “posted in last 7 days” we’d need posted-date from ATS APIs or page parsing; Brave doesn’t give it. For now “new” = first time we see the URL.
+7. **ATS feed (Path #2):** For companies we already have, ATS feed can add new openings at those companies without relying on Brave’s ranking; use when we have a “top companies” list (5e).
+
+- **Status:** Documented. Recommended: increase daily to 10 pages; consider run frequency and optional logging of more_results_available.
+
+### 5b. Discovery + apply: many URLs stale (404 at enrich; dead when user clicks to apply)
+- **Observation:** A large share of URLs captured return "job not found" at enrich time (404). Additionally, many URLs that we *did* enrich successfully are **no longer open when the user follows the link to apply**.
+- **User data (Feb 2026):** 363 roles total; 93 dead/HTTP_404. Of 270 remaining, 205 scored ≥50. User reviewed 151 of those; **93 of 151 (61%) were not available** when clicking through (Ashby: "Job not found"; Greenhouse: "The job you are looking for is no longer open."). Lever roles did not appear among the 93—suggesting Lever postings may stay discoverable longer or were not in the sampled 151.
+- **Two layers of staleness:** (1) **At discovery/enrich:** URLs already closed when we fetch → 404, marked Dead. (2) **At apply time:** Enriched and scored, but job closed between our fetch and user’s click → wasted review effort.
+- **Plan:** (1) Run discovery more frequently so we see postings sooner. (2) Consider optional "last checked open" or HEAD re-check before surfacing for apply (e.g. filter or badge "checked open in last 24h"). (3) Prefer or prioritize sources that stay open longer if data supports it (e.g. Lever in this sample). (4) Document expected stale rate in context; accept some staleness as inherent to job boards.
+- **Status:** Numbers and next steps captured; follow-up TBD
 
 ### 5f. Enrichment failures (HTTP_404, TEXT_TOO_SHORT): path to fixing and scoring
 - **Observed:** Of 363 total records, 95 HTTP_404 and 105 TEXT_TOO_SHORT. 404s are invalid/closed links; TEXT_TOO_SHORT are valid URLs where we did not get enough content (e.g. Ashby JS-rendered page, or stub/closed page returning 200).
@@ -196,9 +235,10 @@
 
 ## Suggested order to work through (next steps)
 
-1. **Now:** Use current pipeline (daily or per-source Brave discovery → Gate 3B → Gate 4); shortlist and apply; decide Falcon sync (P1 #5).
-2. **P0/P2:** Implement location scoring rules when confirmed (P0 #10); optionally run scoring audit (P2 #11) when you have a gold set.
-3. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), LinkedIn (#7), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings" (5e).
+1. **Now (P0):** Fix daily discovery (5g)—remove or relax `freshness` for daily run so Gate 3A returns results; document Brave freshness semantics in context.
+2. **Now:** Use pipeline (daily or per-source catch-up → Gate 3B → Gate 4); shortlist and apply; decide Falcon sync (P1 #5). Expect some staleness (5b); run discovery more often to reduce dead-on-apply.
+3. **P0/P2:** Implement location scoring rules when confirmed (P0 #10); optionally run scoring audit (P2 #11) when you have a gold set.
+4. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), LinkedIn (#7), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings" (5e).
 
 ---
 
@@ -247,4 +287,5 @@
 - **P1 #5a:** Documented discovery job-posting age: no freshness filter is applied (Brave API called without freshness param); intent for initial runs is to capture older-but-active roles (e.g. up to ~2 months); later can add optional freshness=pd/pw for recent-only runs. Comment added in JobDiscovery.ts.
 - **P1 #5c:** Documented why 258 ≠ “all matching roles” (Brave caps + search-index subset). Added context.md §3.4 and plan item 5c with audit process: company-level recall check (pick companies, count matching roles on board vs in sheet), optional Brave total logging.
 - **Feb 2026:** Added "Where we are / What's next"; context §3.5 (6-min limit, Brave vs ATS-feed per-source, ATS batching, Path #2 limited value now—better for future "top companies watch"). Plan 5e reframed; suggested order updated. ATS feed deferred as primary discovery until ranked top-companies list exists.
+- **Feb 2026:** Gate 3A daily zero results (5g): assessed—Brave `freshness` = page crawl date, not job post date; daily over-filters. Plan: remove/relax freshness for daily. Stale jobs (5b): added user data (93/151 dead on apply, 61%); next steps: run discovery more often, optional HEAD before apply. 5h: Gate 3A summary—what we changed, how we capture new roles, dedupe (post-retrieval only; Brave has no exclude-URL API), same-order risk (use 10 pages for daily), and "other questions to consider." Daily run increased to 10 pages; optional log of Brave more_results_available.
 - *(Add short lines here as we complete or change items.)*
