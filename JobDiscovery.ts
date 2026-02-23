@@ -419,6 +419,30 @@ function gate0_writeTestRows() {
       .trim();
   }
 
+  /**
+   * Truncate JD text at known noise markers (LinkedIn sidebar, similar jobs, footer).
+   * Keeps only the actual job description + qualifications.
+   */
+  function truncateJdNoise_(text) {
+    if (!text) return "";
+    var markers = [
+      "\nSeniority level\n",
+      "\nSimilar jobs\n",
+      "\nPeople also viewed\n",
+      "\nSimilar Searches\n",
+      "\nReferrals increase your chances",
+      "\nShow more jobs like this",
+      "\nMore searches\n",
+      "\nExplore collaborative articles"
+    ];
+    var cutIdx = text.length;
+    for (var i = 0; i < markers.length; i++) {
+      var idx = text.indexOf(markers[i]);
+      if (idx !== -1 && idx < cutIdx) cutIdx = idx;
+    }
+    return text.substring(0, cutIdx).trim();
+  }
+
   /** Superseded by gate3A_braveSearchToRoles_lever() below (uses braveSearchToRoles_generic_). Kept for reference. */
   function gate3A_braveSearchToRoles_lever_standalone() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -634,7 +658,7 @@ function gate0_writeTestRows() {
           });
           httpStatus = resp.getResponseCode();
           const html = resp.getContentText();
-          text = htmlToText_(html);
+          text = truncateJdNoise_(htmlToText_(html));
 
           // Detect common failure pages
           const lower = (text || "").toLowerCase();
