@@ -599,7 +599,7 @@ function gate0_writeTestRows() {
       // Enrich any New row (brave_search, ats_feed, or blank source for legacy)
       if (!url || status !== "New") continue;
       const src = (source != null && source !== "") ? String(source).trim() : "";
-      if (src && src !== "brave_search" && src !== "ats_feed" && src !== "serpapi_google_jobs") continue; // skip other sources (e.g. google_alert, test_email)
+      if (src && src !== "brave_search" && src !== "ats_feed" && src !== "serpapi_google_jobs" && src !== "linkedin_alert") continue;
       // Only skip if we already have a real JD (length > 500). Short junk (e.g. "lever", "ashby", "greenhouse") stays eligible.
       const jdLen = (jdTextExisting != null && jdTextExisting !== "") ? String(jdTextExisting).trim().length : 0;
       if (jdLen > 500) continue;
@@ -1933,4 +1933,218 @@ function gate0_writeTestRows() {
     });
 
     logs.appendRow([new Date(), label, "Test completed. Check Logs above for details and Roles sheet for new rows."]);
+  }
+
+  // ─── LinkedIn Job Alerts Ingestion ───────────────────────────────────────────
+
+  /**
+   * Canonicalize a LinkedIn job URL to https://www.linkedin.com/jobs/view/NUMERIC_ID
+   * Handles /comm/jobs/view/ (email links) and /jobs/view/slug-NUMERIC_ID variants.
+   */
+  function canonicalizeLinkedInJobUrl_(url) {
+    if (!url) return null;
+    var m = String(url).match(/linkedin\.com\/(?:comm\/)?jobs\/view\/(?:.*[-\/])?(\d{8,})/);
+    if (!m) return null;
+    return "https://www.linkedin.com/jobs/view/" + m[1];
+  }
+
+  /**
+   * Parse LinkedIn alert email HTML and extract job listings.
+   * Returns array of {url, title, company, location}.
+   */
+  function parseLinkedInAlertJobs_(html) {
+    if (!html) return [];
+
+    var linkRe = /<a[^>]+href\s*=\s*['"]([^'"]*linkedin\.com\/(?:comm\/)?jobs\/view\/[^'"]+)['"][^>]*>([\s\S]*?)<\/a>/gi;
+    var m;
+
+    // Group all <a> occurrences by canonical URL to collect data from each
+    // (LinkedIn uses multiple links per job card: logo, card wrapper, title link)
+    var jobMap = {};
+    var jobOrder = [];
+
+    while ((m = linkRe.exec(html)) !== null) {
+      var rawUrl = m[1];
+      var linkContent = m[2];
+
+      var canonical = canonicalizeLinkedInJobUrl_(rawUrl);
+      if (!canonical) continue;
+
+      if (!jobMap[canonical]) {
+        jobMap[canonical] = { url: canonical, title: "", company: "", location: "", lastMatchEnd: 0 };
+        jobOrder.push(canonical);
+      }
+      var job = jobMap[canonical];
+      job.lastMatchEnd = m.index + m[0].length;
+
+      // Extract company from <img alt="..."> (logo link)
+      var imgAlt = linkContent.match(/<img[^>]+alt\s*=\s*['"]([^'"]+)['"]/i);
+      if (imgAlt && !job.company) {
+        var altText = imgAlt[1].trim();
+        if (altText.length > 1 && altText.length < 120) {
+          job.company = altText;
+        }
+      }
+
+      // Extract title from text content (skip links that only wrap images or tables)
+      var textContent = linkContent.replace(/<[^>]+>/g, "").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+      if (textContent.length > 2 && !job.title) {
+        if (!/^(jobs similar|new jobs|apply to|apply now)/i.test(textContent)) {
+          job.title = textContent;
+        }
+      }
+    }
+
+    // Second pass: extract location from HTML after the last link occurrence for each job
+    var jobs = [];
+    for (var i = 0; i < jobOrder.length; i++) {
+      var key = jobOrder[i];
+      var job = jobMap[key];
+
+      if (!job.location && job.lastMatchEnd > 0) {
+        var afterSnippet = html.substring(job.lastMatchEnd, job.lastMatchEnd + 600);
+        var afterText = afterSnippet.replace(/<[^>]+>/g, "\n").replace(/&[^;]+;/g, " ").trim();
+        var lines = afterText.split(/\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 1; });
+
+        for (var li = 0; li < Math.min(lines.length, 5); li++) {
+          var line = lines[li];
+          // LinkedIn may use · (\u00B7), • (\u2022), or HTML entity for separator
+          var dotParts = line.split(/\s*[\u00B7\u2022\u2013\u2014|]\s*/);
+          if (dotParts.length >= 2 && dotParts[1].length > 1) {
+            if (!job.company) job.company = dotParts[0].trim();
+            job.location = dotParts[1].trim();
+            break;
+          }
+          // Also try "City, STATE" pattern directly
+          if (!job.location) {
+            var locMatch = line.match(/\b([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|Remote)\b/);
+            if (locMatch) {
+              job.location = locMatch[0];
+            }
+          }
+        }
+      }
+
+      // Skip header links with no title and no company (email header, not a job card)
+      if (!job.title && !job.company) continue;
+
+      jobs.push({ url: job.url, title: job.title, company: job.company, location: job.location });
+    }
+
+    return jobs;
+  }
+
+  /**
+   * Diagnostic: scan LinkedIn alert emails and log parsed results (no sheet writes).
+   * Run this first to verify email parsing before using the full ingestion function.
+   */
+  function gate1_linkedInAlerts_diagnostic() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var logs = ensureSheet_(ss, "Logs");
+    var label = "Gate 1 (LI diag)";
+
+    var query = 'from:jobs-noreply@linkedin.com newer_than:14d';
+    var threads = GmailApp.search(query, 0, 20);
+
+    logs.appendRow([new Date(), label, "Query: " + query + ". Found " + threads.length + " threads."]);
+    if (!threads.length) return;
+
+    // Log all email subjects so we can identify which are alerts vs application emails
+    for (var t = 0; t < threads.length; t++) {
+      var firstMsg = threads[t].getMessages()[0];
+      var subj = firstMsg.getSubject();
+      var jobCount = parseLinkedInAlertJobs_(firstMsg.getBody()).length;
+      logs.appendRow([new Date(), label, "Thread " + (t + 1) + ": \"" + subj + "\" | jobs=" + jobCount + " | date=" + firstMsg.getDate()]);
+    }
+
+    // Find first thread that looks like an actual job alert (has "alert" or "jobs" in subject)
+    var alertMsg = null;
+    for (var t2 = 0; t2 < threads.length; t2++) {
+      var msg = threads[t2].getMessages()[0];
+      var s = msg.getSubject().toLowerCase();
+      if (s.indexOf("alert") !== -1 || s.indexOf("new job") !== -1 || s.indexOf("jobs match") !== -1 || s.indexOf("recommended") !== -1) {
+        alertMsg = msg;
+        break;
+      }
+    }
+    if (!alertMsg) alertMsg = threads[0].getMessages()[0];
+
+    logs.appendRow([new Date(), label, "Debugging email: \"" + alertMsg.getSubject() + "\""]);
+
+    var alertJobs = parseLinkedInAlertJobs_(alertMsg.getBody());
+    logs.appendRow([new Date(), label, "Parsed " + alertJobs.length + " jobs from alert email."]);
+
+    for (var aj = 0; aj < Math.min(alertJobs.length, 10); aj++) {
+      var ajob = alertJobs[aj];
+      logs.appendRow([new Date(), label,
+        (aj + 1) + ". \"" + ajob.title + "\" @ \"" + ajob.company + "\" | loc=\"" + ajob.location + "\" | " + ajob.url
+      ]);
+    }
+  }
+
+  /**
+   * Ingest LinkedIn job alert emails from Gmail into the Roles sheet.
+   * Scans recent LinkedIn alert emails, extracts job URLs + metadata, deduplicates, writes new rows.
+   */
+  function gate1_ingestLinkedInAlerts() {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var rolesAndMap = ensureRolesSchema_();
+    var roles = rolesAndMap.sheet;
+    var headerMap = rolesAndMap.headerMap;
+    var logs = ensureSheet_(ss, "Logs");
+    var label = "Gate 1 (LinkedIn)";
+
+    var query = 'from:jobs-noreply@linkedin.com newer_than:14d';
+    var threads = GmailApp.search(query, 0, 50);
+
+    if (!threads.length) {
+      logs.appendRow([new Date(), label, "No LinkedIn alert emails found for query: " + query]);
+      return;
+    }
+
+    var existing = new Set(getColumnValues_(roles, 1));
+    var numCols = roles.getLastColumn();
+
+    var scannedMsgs = 0;
+    var urlsFound = 0;
+    var written = 0;
+    var skippedDupes = 0;
+
+    for (var t = 0; t < threads.length; t++) {
+      var messages = threads[t].getMessages();
+      for (var mi = 0; mi < messages.length; mi++) {
+        scannedMsgs++;
+        var body = messages[mi].getBody();
+        var jobs = parseLinkedInAlertJobs_(body);
+        urlsFound += jobs.length;
+
+        for (var j = 0; j < jobs.length; j++) {
+          var job = jobs[j];
+          if (existing.has(job.url)) {
+            skippedDupes++;
+            continue;
+          }
+          existing.add(job.url);
+
+          var row = new Array(numCols).fill("");
+          row[headerMap["canonical_url"] - 1] = job.url;
+          row[headerMap["company"] - 1] = job.company;
+          row[headerMap["job_title"] - 1] = job.title;
+          row[headerMap["source"] - 1] = "linkedin_alert";
+          row[headerMap["discovered_date"] - 1] = new Date();
+          row[headerMap["status"] - 1] = "New";
+          if (headerMap["ats"]) row[headerMap["ats"] - 1] = "linkedin";
+          if (headerMap["location_raw"] && job.location) row[headerMap["location_raw"] - 1] = job.location;
+
+          roles.appendRow(row);
+          written++;
+        }
+      }
+    }
+
+    logs.appendRow([new Date(), label,
+      "Scanned " + threads.length + " threads / " + scannedMsgs + " msgs. "
+      + "Found " + urlsFound + " job URLs. Wrote " + written + " new. "
+      + "Skipped " + skippedDupes + " dupes."
+    ]);
   }
