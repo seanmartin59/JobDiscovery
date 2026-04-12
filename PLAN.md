@@ -2,42 +2,51 @@
 
 **Purpose:** Living document to prioritize, sequence, and track progress. Update as we complete items and add new goals.
 
-**Scope of this document:** This plan *started* from a specific set of 12 questions (planning file, search criteria, Applied/Falcon sync, custom answers, LinkedIn, scalability, scoring bugs, etc.). It is **not** yet a full project plan. As we add broader goals, phases, and context from `context.md` (and elsewhere), this file can become the **single comprehensive project plan**. Until then, treat the sections below as "plan for this batch of questions" plus any broader context we pull in.
+**Scope of this document:** Comprehensive project plan for the JobDiscovery system. Covers discovery sources, enrichment, scoring, application workflows, and company targeting. Updated continuously as items are completed and priorities shift.
 
 ---
 
-## Broader project context (from context.md)
+## Broader project context
 
-- **Goal:** System that runs as autonomously as possible to (1) discover new job postings daily matching target roles (Strategy & Operations, BizOps, Head of Business Ops/Strategy, Strategic Finance, GM, Chief of Staff, etc.) across ATS domains, (2) store in a structured tracker (Sheet for now), (3) enrich with JD text + key fields, (4) compute fit score and rank, (5) on demand generate draft responses to application questions. Constraints: free/cheap MVP first; no brittle SERP scraping; avoid dead ends (e.g. Google Custom Search JSON API).
-- **Current MVP state:** Discovery via Brave (Lever, Ashby, Greenhouse); Gate 3B enrichment (incl. Ashby API); Gate 4 heuristic scoring; Roles + Logs in Google Sheet. Pipeline works; some Ashby TEXT_TOO_SHORT and scoring refinements in progress.
-- **Desired next state (context §5):** Daily run: discover → enrich → score; Shortlist for review; robust to 404s, demo boards, missing fields. Later consideration: older results for broader coverage.
-- *Additional vision (your expanded objectives) is captured under P4 item 4 below.*
-
----
-
-## Where we are / What's next (assessment)
-
-**Current state:** Discovery (Brave catch-up + daily, split by source to avoid 6-min timeout), enrichment (Gate 3B, incl. Ashby API), scoring (Gate 4 v0). Roles sheet has ~364 rows from Lever/Ashby/Greenhouse. Path #2 (ATS feed) is implemented: discover from ATS APIs using companies already in the sheet, batched (18 companies per run) to stay under 6 min.
-
-**Limits we hit:** (1) Brave returns a finite slice per query; re-runs add ~0 when that slice is already in the sheet. (2) Apps Script 6-min limit: full catch-up and full ATS feed time out; we use per-source and batching. (3) ATS feed only sees companies we already have, so it doesn't expand the *universe* of companies -- it can add more roles at those companies.
-
-**Recommended next steps (in order):**
-1. **Implement SerpAPI Google Jobs integration (section 6.4-6.6):** Decision made: SerpAPI Google Jobs free tier ($0/month, 250 searches/month). Build core function + catch-up + daily runner in JobDiscovery.ts. Run catch-up once (~45 credits), then daily (~3-5 credits/day). Validates freshness and ATS coverage; replaces Brave as primary discovery if results are good.
-2. **Enrich + score new SerpAPI-discovered roles:** Run Gate 3B and Gate 4 on newly added rows. Compare liveness/freshness vs Brave-discovered roles.
-3. **Scoring and location:** Confirm location rules and implement when ready (P0 #10). Optionally run scoring audit (P2 #11) when you have a gold set.
-4. **Later:** Phase 2 hybrid (aggregator + ATS APIs for known companies), Falcon sync, custom-answers workflow (P3), company fit / cold outreach (P4).
+- **Goal:** System that runs as autonomously as possible to (1) discover new job postings matching target roles (Strategy & Operations, BizOps, Head of Business Ops/Strategy, Strategic Finance, Chief of Staff, etc.) across multiple sources, (2) store in a structured tracker (Google Sheet), (3) enrich with JD text + key fields, (4) compute fit score and rank, (5) on demand generate draft responses to application questions, (6) monitor target companies for new openings, (7) support follow-up and cold outreach workflows.
+- **Constraints:** Free/cheap MVP first; no brittle SERP scraping; Google Apps Script runtime (6-min limit); avoid dead ends.
+- *Expanded vision and roadmap captured under P4 item 4 below.*
 
 ---
 
-## Priority overview (this batch of questions)
+## Where we are (Feb 2026)
+
+**Current state:** Three discovery sources operational, full pipeline working end-to-end.
+
+**Discovery sources (Gate 3A / Gate 1):**
+- **SerpAPI Google Jobs (primary, done):** 4 keyword-group queries, no date filter, ~8-10 credits/run. Run weekly. ~114 roles discovered. Catch-up complete.
+- **LinkedIn job alerts (done):** `gate1_ingestLinkedInAlerts()` parses Gmail for LinkedIn alert emails, extracts title/company/location/URL. First run: 46 new roles from 11 emails. Free, zero API credits. Captures LinkedIn-exclusive listings and personalized recommendations.
+- **Brave Search (legacy, still available):** Original discovery source. Superseded by SerpAPI for primary use due to stale index (61% of roles dead on apply). Code retained for ad-hoc use.
+- **ATS feeds (available, underutilized):** Per-company polling of Lever/Ashby/Greenhouse APIs. Infrastructure built with batching. Limited value without curated company list; will become powerful once target company list exists (#9).
+
+**Enrichment (Gate 3B):** Fetches JD text from job URLs. Handles Ashby API, LinkedIn public pages, Lever/Greenhouse HTML. JD noise truncation strips LinkedIn sidebar content. Batch cap: 120 rows/run. Sources: `brave_search`, `ats_feed`, `serpapi_google_jobs`, `linkedin_alert`.
+
+**Scoring (Gate 4):** Heuristic v0. Scores all Enriched + TEXT_TOO_SHORT rows. Title matching, keyword analysis, location/work-mode signals, comp extraction. No cap on rows scored.
+
+**Sheet:** ~500+ roles across all sources. ~21 columns. Roles + Logs sheets.
+
+**Known limitations:**
+- SerpAPI: Google Jobs caps at ~10-20 results per query. 4 queries x ~10 = ~40 results per run; dedup means weekly runs add fewer over time.
+- LinkedIn alerts: Volume depends on LinkedIn's algorithm; not exhaustive.
+- Enrichment: ~25% of SerpAPI roles fail with HTTP_403 (aggregator sites block scraping). LinkedIn roles mostly succeed (public pages accessible).
+- Scoring: Location rules not yet refined (P0 #10). JD noise from already-enriched LinkedIn roles not cleaned (only future enrichments use truncation).
+
+---
+
+## Priority overview
 
 | P | Meaning | Items |
 |---|--------|--------|
-| **P0** | Fix now (incorrect behavior or confusion) | 10, 12 |
-| **P1** | Foundation (decisions + quick wins) | 1, 2, 5 |
-| **P2** | Scoring & prioritization (quality of fit) | 3, 9, 11, 13 |
-| **P3** | Workflows & scripts (apply, custom answers) | 5 sync, 6 |
-| **P4** | Vision, scale, new sources | 4, 7, 8 |
+| **P0** | Fix now (incorrect behavior) | 10 (location scoring -- analysis done, implementation deferred) |
+| **P1** | Foundation (done) | 1 (plan file), 2 (search criteria), 5a-5h (discovery analysis), 12 (Cursor warnings) |
+| **P2** | Scoring & prioritization | 3 (scoring notes), 9 (similar companies -- see P4 #9), 11 (scoring audit), 13 (applied/archived scoring) |
+| **P3** | Workflows & scripts | 5 sync (Falcon), 6 (custom answers) |
+| **P4** | Vision, scale, new sources | 4 (roadmap), 7 (LinkedIn -- **done**), 7b (ATS URL resolver), 8 (scalability), 9 (target companies) |
 
 ---
 
@@ -67,6 +76,10 @@
 - **Question:** Are we capturing strategic finance and other target roles?
 - **Done:** Audited queries. All three sources use: Strategy Operations, BizOps, Business Operations, Strategic Finance, Strategy, Operations. Documented in context.md §3.3 Search criteria. To add terms (e.g. Chief of Staff, GM), edit the gate3A_braveSearchToRoles_* query strings.
 - **Status:** Done
+
+### 5a-5h. Brave discovery analysis (HISTORICAL -- superseded by SerpAPI)
+
+*The sections below document the Brave-era discovery analysis. Brave has been superseded by SerpAPI Google Jobs as the primary discovery source. Retained for reference.*
 
 ### 5a. Discovery: job posting age (freshness filter)
 - **Current behavior:** Catch-up runs use **no** freshness. Daily run uses `freshness=pw` (past 7 days) to target "new" postings.
@@ -245,7 +258,7 @@
   - Email format may change over time (parsing could break; fixable).
   - Requires user to set up alerts manually (one-time).
   - Volume depends on LinkedIn's alert frequency and how many jobs they include per email.
-- **Status:** Planned; implement immediately after SerpAPI integration is stable.
+- **Status:** DONE (Feb 2026). Functions built: `gate1_ingestLinkedInAlerts()`, `gate1_linkedInAlerts_diagnostic()`, `parseLinkedInAlertJobs_()`, `canonicalizeLinkedInJobUrl_()`. First run: 46 roles from 11 emails. Gate 3B updated to accept `linkedin_alert` source. JD noise truncation added (`truncateJdNoise_()`) to clean LinkedIn sidebar content from enriched text.
 
 ### 7b. ATS URL resolver for HTTP_403 roles (Phase 2)
 - **Problem:** SerpAPI discovers jobs across the entire web, but many canonical URLs point to aggregator sites (Indeed, ZipRecruiter, Monster, Talent.com, Jobrapido, etc.) that return HTTP_403 when we try to fetch the JD. These roles have title, company, and location from SerpAPI but no JD text, limiting scoring accuracy.
@@ -261,6 +274,28 @@
 - **Priority:** After LinkedIn ingestion. The 403 roles are still scored (with less precision); this is an accuracy improvement, not a blocker.
 - **Status:** Planned.
 
+### 9. Target company identification and board monitoring
+- **Objective:** Build a ranked list of companies at the intersection of (a) where you'd be most excited to work and (b) most likely to have roles you'd be a strong fit for. Then continuously monitor their specific job boards for new openings.
+- **Phase 1: Build the target company list**
+  - **Data-driven seeding:** Extract companies from roles already scored highly in the Roles sheet (e.g., fit_score >= 70). These are companies that have already posted relevant roles. Deduplicate and rank by frequency + average score.
+  - **Manual curation:** Add companies you're personally excited about but that haven't appeared in discovery yet (e.g., companies you admire, have connections at, or are in industries you prefer).
+  - **Company scoring dimensions:** Industry/sector fit, company stage (startup vs. growth vs. enterprise), culture signals, comp range observed, geographic fit, number of relevant roles posted, whether they use a known ATS (Lever/Ashby/Greenhouse).
+  - **Storage:** New "Companies" sheet in the spreadsheet with columns: company_name, ats_type, ats_slug, company_score, last_checked, notes.
+- **Phase 2: Monitor their boards**
+  - For companies on Lever/Ashby/Greenhouse: use existing `gate3A_discoverFromAtsFeeds()` (already built, handles batching) to poll their boards on a schedule (e.g., weekly).
+  - For companies on other platforms: store their careers page URL; optionally build a lightweight scraper or manual check process.
+  - **New roles trigger:** When a new role appears on a monitored company's board, write it to Roles sheet with source=`company_watch`, run enrichment + scoring automatically.
+  - **Cadence:** Weekly polling for top-tier companies; less frequent for lower-tier. Stay within Apps Script 6-min limit by batching (already solved with offset/maxCompanies pattern).
+- **Phase 3: Cold outreach for top companies with no current openings**
+  - For top-ranked companies that don't currently have matching roles posted: flag for cold outreach.
+  - Identify contacts (hiring managers, heads of strategy/ops) via LinkedIn.
+  - Draft outreach templates expressing interest in the company and relevant capabilities.
+  - Track outreach in the sheet (contacted date, response, follow-up).
+- **Relationship to existing work:**
+  - The "Phase 2 hybrid" approach in the suggested order (item 5) is a subset of this. This plan expands it to include company scoring, manual curation, and cold outreach.
+  - The ATS feed infrastructure is already built (`gate3A_discoverFromAtsFeeds`, batching with offset/maxCompanies). It just needs a curated company list to be effective.
+- **Status:** Planned. Depends on having enough scored roles to seed the company list (available now with ~500 roles scored).
+
 ### 8. Scalability -- when does the sheet break?
 - **Question:** At what point does the Google Sheet become insufficient, and what to do?
 - **Approach:** (1) Rough limits: Sheets has cell limits (~10M cells), script runtime (6 min), URL Fetch quotas. Estimate: e.g. 10k-50k rows with current columns might be fine; beyond that, export/archiving or migration. (2) Mitigations: archive old rows (e.g. "Dead" or applied >90 days ago) to another sheet or CSV; limit active sheet to "current" roles. (3) Migration path: when we hit limits, move to a DB (e.g. SQLite + script, or Supabase) and keep Sheets as a view or export target. Document thresholds and "when to migrate" in this plan or context.md.
@@ -270,12 +305,23 @@
 
 ## Suggested order to work through (next steps)
 
-1. **Now:** Finish SerpAPI Google Jobs integration. Enrich + score SerpAPI-discovered roles. Compare liveness vs Brave results. Set up daily runner.
-2. **Next:** LinkedIn job alerts ingestion (#7). Set up alerts, build `gate1_ingestLinkedInAlerts()`, start capturing LinkedIn-exclusive roles. Highest-volume free source available.
-3. **Then:** ATS URL resolver (#7b). Recover JD text for HTTP_403 roles by finding original ATS postings. Improves scoring accuracy for ~25% of SerpAPI results.
-4. **P0/P2:** Implement location scoring rules when confirmed (#10); optionally run scoring audit (#11) when you have a gold set.
-5. **Phase 2 hybrid:** Extract company slugs from SerpAPI + LinkedIn results -> build Companies list -> ATS API polling for depth at known companies.
-6. **P3/P4:** Falcon sync script (#5), custom-list workflow (#6), then roadmap (#4), scale (#8). When you have a **top companies** list, use ATS feed as "watch these companies for new openings".
+**Completed:**
+- SerpAPI Google Jobs integration (catch-up + periodic runner, split queries, no date filter)
+- LinkedIn job alerts ingestion (email parsing, title/company extraction, dedup)
+- Gate 3B: linkedin_alert + serpapi_google_jobs sources, 120-row batch cap, JD noise truncation
+- Gate 4: scores all Enriched + TEXT_TOO_SHORT rows, no cap
+
+**Next priorities (in order):**
+1. **Location scoring (#10):** Implement the location rules from the analysis section below (non-US penalty, US on-site tiers). This is the highest-impact scoring improvement.
+2. **Target company identification (#9 Phase 1):** Build ranked company list from high-scoring roles + manual curation. Create "Companies" sheet. This unlocks ATS feed monitoring for depth.
+3. **Target company monitoring (#9 Phase 2):** Set up weekly ATS feed polling for top companies using existing `gate3A_discoverFromAtsFeeds()` infrastructure.
+4. **ATS URL resolver (#7b):** Recover JD text for HTTP_403 roles by finding original ATS postings. Improves scoring accuracy for ~25% of SerpAPI results.
+5. **Scoring audit (#11):** Build gold set from reviewed roles; systematically improve scoring heuristics.
+6. **Applied/archived scoring (#13):** Score and prioritize applied roles (for follow-up) and archived custom-question roles (for drafting).
+7. **Falcon sync (#5):** Script to copy applied rows from JobDiscovery to Project Falcon.
+8. **Custom answers workflow (#6):** Check if custom-question roles are still open, prioritize, support drafting.
+9. **Cold outreach (#9 Phase 3):** For top companies with no current openings, identify contacts and draft outreach.
+10. **Scalability (#8):** Archive old rows, plan migration path when sheet approaches limits.
 
 ---
 
@@ -469,20 +515,18 @@ This uses 1 credit per page instead of 5-6 separate queries. Combined with `afte
 - Copy API key.
 - In Google Apps Script editor: File > Project Settings > Script Properties > add `SERPAPI_KEY` = your key.
 
-#### Query constants
+#### Query constants (as implemented)
 
 ```
 SERPAPI_QUERIES_CATCHUP_ = [
-  '("Strategy Operations" OR "BizOps" OR "Business Operations")',
-  '("Strategic Finance" OR "Chief of Staff")',
-  '("Head of Operations" OR "General Manager" OR "Head of Business Operations")'
+  '"strategy & operations" OR "strategy operations" OR "strategic operations" OR "strategy & ops"',
+  '"business operations" OR "bizops" OR "biz ops"',
+  '"strategic finance" OR "chief of staff"',
+  '"head of operations" OR "director of operations" OR "VP operations" OR "head of business operations"'
 ]
-
-SERPAPI_QUERY_DAILY_ =
-  '("Strategy Operations" OR "Strategic Finance" OR "BizOps" OR "Business Operations" OR "Chief of Staff" OR "Head of Operations")'
 ```
 
-Catch-up uses 3 separate queries so each keyword group gets its own result set (avoids one keyword dominating Google's ranking). Daily uses a single combined query to minimize credit usage.
+Both catch-up and periodic (daily/weekly) runners use the same 4 split queries. Combined OR query was abandoned because Google Jobs caps at ~10-20 results per query -- splitting into 4 queries yields ~4x more unique results.
 
 #### Core function: `serpApiGoogleJobsToRoles_(params)`
 
@@ -513,27 +557,24 @@ For each result's `apply_options`, prioritize in order:
 
 Strip tracking params (`utm_campaign`, `utm_source`, `utm_medium`) from URLs before storing, to improve dedup accuracy.
 
-#### Catch-up runner: `gate3A_serpApiCatchUp()`
+#### Catch-up runner: `gate3A_serpApiCatchUp()` (DONE)
 
-- Runs 3 separate keyword queries (from `SERPAPI_QUERIES_CATCHUP_`)
-- Each with `afterDate` = ~2 months ago, `maxPages` = 15
-- Estimated cost: ~30-45 credits (one-time)
-- Run once to backfill, then not again
+- Runs 4 keyword queries, `maxPages` = 15, no date filter
+- Estimated cost: ~8 credits (Google Jobs exhausts at ~2 pages per query)
+- Run once; completed Feb 2026. ~114 roles discovered across multiple runs.
 
-#### Daily runner: `gate3A_serpApiDaily()`
+#### Periodic runner: `gate3A_serpApiDaily()` (DONE)
 
-- Runs 1 combined query (from `SERPAPI_QUERY_DAILY_`)
-- `afterDate` = 3 days ago (overlap ensures no gaps between runs)
-- `maxPages` = 10 (but will usually exhaust results in 2-5 pages for recent-only)
-- Adaptive: stops when `next_page_token` is absent, so quiet days cost fewer credits
-- Estimated cost: ~3-5 credits/day = ~90-150/month (well within 250 free)
-- Log start + completion (consistent with existing daily runner pattern)
+- Runs same 4 keyword queries, `maxPages` = 5, no date filter
+- Deduplication handles freshness (only new URLs written)
+- ~8-10 credits per run. Run weekly (or every few days).
+- Adaptive: stops when `next_page_token` is absent
 
 #### Credit budget (free tier: 250/month)
 
-- **Month 1:** ~45 (catch-up) + ~120 (daily x 30) = ~165 credits. Buffer: 85.
-- **Month 2+:** ~120 (daily x 30). Buffer: 130.
-- Leaves room for ad-hoc deeper queries or Adzuna testing.
+- **Weekly runs:** ~8-10 credits x 4 = ~32-40/month. Buffer: 210+.
+- **Ample room** for catch-up re-runs, location-targeted queries, or experimentation.
+- If run every 2-3 days: ~80-120/month. Still well within budget.
 
 #### What this does NOT change
 
@@ -576,4 +617,8 @@ Strip tracking params (`utm_campaign`, `utm_source`, `utm_medium`) from URLs bef
 - **Feb 2026:** Section 6 Discovery redesign: first-principles analysis. Documented why Brave-primary fails (stale index, 61% dead on apply, incomplete coverage). Evaluated all available approaches: search engines (Brave, SerpAPI/Google Jobs), aggregators (Adzuna, JSearch), ATS public APIs (Lever/Ashby/Greenhouse per-company), ATS global feeds (Lever/Greenhouse have none; Ashby partner feed gated), Google CTS (not applicable). Recommended path: test a job-specific aggregator (SerpAPI Google Jobs or Adzuna) for freshness and coverage; if good, build hybrid (aggregator for broad discovery + ATS APIs for depth). Open questions documented. No implementation yet.
 - **Feb 2026:** Updated "Recommended next steps" and "Suggested order" to reflect discovery redesign as top priority.
 - **Feb 2026:** Discovery redesign decision: SerpAPI Google Jobs free tier ($0/month, 250 searches/month). Research completed: evaluated SerpAPI, Adzuna, JSearch pricing and capabilities. Key optimization: combined OR queries reduce credit usage by ~80%. Google Jobs supports `OR`, `after:`, quoted phrases; returns `posted_at`, direct ATS URLs in `apply_options`, aggregates from LinkedIn/Indeed/etc. Section 6.4 updated from speculative to concrete; 6.5 open questions updated with answers; 6.6 added with full implementation spec (query constants, core function, catch-up + daily runners, URL canonicalization, credit budget, coverage limitations). Migrated plan from `.cursor/plans/serpapi_google_jobs_integration_3619aceb.plan.md` into PLAN.md; old plan files obsoleted. Next steps and suggested order updated.
+- **Feb 2026:** SerpAPI Google Jobs integration COMPLETE. Catch-up run done (~114 roles). Daily runner updated: split into 4 separate keyword queries (Google Jobs caps at ~10-20 per query; splitting gives ~4x coverage). Date filter removed (dedup handles freshness). Queries broadened to include "Strategy & Operations", "Strategy & Ops", "Strategic Operations" variants. "General Manager" excluded (too much fast-food/retail noise). Weekly cadence recommended (~8-10 credits/run, ~32-40/month). Location-targeted queries noted as future enhancement.
+- **Feb 2026:** Gate 3B updates: batch cap increased from 50 to 120 rows/run. `serpapi_google_jobs` and `linkedin_alert` added to allowed sources. JD noise truncation (`truncateJdNoise_()`) added to strip LinkedIn sidebar content (Similar jobs, People also viewed, etc.) at known markers.
+- **Feb 2026:** LinkedIn job alerts ingestion COMPLETE. Built `gate1_ingestLinkedInAlerts()`: scans Gmail for LinkedIn alert emails, parses HTML to extract job title (from nested link text), company (from img alt), location (Unicode separator + City/STATE fallback). First run: 46 new roles from 11 emails. High-quality companies (xAI, Google, Stripe, Microsoft, GitHub, etc.) with variant titles not covered by SerpAPI queries. Diagnostic function for verifying parsing. LinkedIn public job pages accessible for enrichment (54/56 success rate).
+- **Feb 2026:** Plan comprehensive review. Updated "Where we are" to reflect 3 operational discovery sources (~500+ roles). Marked SerpAPI and LinkedIn as DONE. Rewrote suggested order: location scoring -> target companies -> ATS URL resolver -> scoring audit. Marked Brave analysis sections as historical. Added #9 (target company identification and board monitoring) with 3 phases: build list, monitor boards, cold outreach.
 - *(Add short lines here as we complete or change items.)*
