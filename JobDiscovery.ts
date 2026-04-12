@@ -443,6 +443,13 @@ function gate0_writeTestRows() {
     return text.substring(0, cutIdx).trim();
   }
 
+  /** Google Sheets rejects values longer than 50,000 characters in one cell. */
+  function truncateForSheetCell_(s) {
+    const t = (s != null && s !== "") ? String(s) : "";
+    const max = 50000;
+    return t.length <= max ? t : t.substring(0, max);
+  }
+
   /** Superseded by gate3A_braveSearchToRoles_lever() below (uses braveSearchToRoles_generic_). Kept for reference. */
   function gate3A_braveSearchToRoles_lever_standalone() {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -697,7 +704,7 @@ function gate0_writeTestRows() {
       roles.getRange(sheetRow, headerMap["fetched_at"]).setValue(new Date());
   
       if (!failureReason) {
-        roles.getRange(sheetRow, headerMap["jd_text"]).setValue(text);
+        roles.getRange(sheetRow, headerMap["jd_text"]).setValue(truncateForSheetCell_(text));
         roles.getRange(sheetRow, headerMap["location_raw"]).setValue(locationRaw);
         roles.getRange(sheetRow, headerMap["work_mode_hint"]).setValue(workMode);
         roles.getRange(sheetRow, baseCols.status).setValue("Enriched");
